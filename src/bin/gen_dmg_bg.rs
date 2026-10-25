@@ -74,6 +74,9 @@ fn fill_rounded(x: f64, y: f64, w: f64, h: f64, radius: f64, color: &NSColor) {
 fn stroke_line(x0: f64, y0: f64, x1: f64, y1: f64, width: f64, color: &NSColor) {
     let path = NSBezierPath::bezierPath();
     path.setLineWidth(s(width));
+    unsafe {
+        path.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
+    }
     path.moveToPoint(CGPoint::new(s(x0), s(y0)));
     path.lineToPoint(CGPoint::new(s(x1), s(y1)));
     color.setStroke();
@@ -252,14 +255,20 @@ fn render(out: &str, _mtm: MainThreadMarker) {
         &srgb(168.0, 85.0, 247.0, 1.0),
     );
 
-    // 拖装指引箭头：位置由真实渲染像素测量校准——
-    // Pastely 图标视觉中心 (470,263)、Applications (632,306)，取均值 y=285；
-    // Applications 右移至 x=700 后间隙拉宽，箭头 x 545..634；深灰 0.9 保证浅底可见
+    // 拖装指引箭头（确定性几何）：图标中心语义已验证、96pt 由 .DS_Store 锁定——
+    // Pastely 右缘 480 / Applications(x=700) 左缘 652，箭头两侧各留 20pt 等边距：
+    // 圆帽长线 500..612 + 实心三角（尖端 632），y=285 为两图标视觉中心均值
     let guide = srgb(60.0, 60.0, 67.0, 0.9);
-    stroke_line(545.0, 285.0, 602.0, 285.0, 3.5, &guide);
-    stroke_circle(613.0, 285.0, 7.0, 3.5, &guide);
-    stroke_line(624.0, 278.0, 634.0, 285.0, 3.5, &guide);
-    stroke_line(624.0, 292.0, 634.0, 285.0, 3.5, &guide);
+    stroke_line(500.0, 285.0, 612.0, 285.0, 3.0, &guide);
+    let head = NSBezierPath::bezierPath();
+    unsafe {
+        head.moveToPoint(CGPoint::new(s(612.0), s(276.0)));
+        head.lineToPoint(CGPoint::new(s(634.0), s(285.0)));
+        head.lineToPoint(CGPoint::new(s(612.0), s(294.0)));
+        head.closePath();
+    }
+    guide.setFill();
+    head.fill();
 
     // 底部拖装提示：y≈500（自上而下），底距 44pt 防裁切
     draw_text(
