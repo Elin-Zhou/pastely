@@ -92,6 +92,7 @@ fn main() -> anyhow::Result<()> {
             panel: RefCell::new(None),
             runtime: RefCell::new(None),
             ax_hint_shown: RefCell::new(false),
+            ax_prompt_shown: RefCell::new(false),
             settings: RefCell::new(None),
         }));
 

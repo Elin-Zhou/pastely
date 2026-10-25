@@ -82,6 +82,8 @@ pub struct Globals {
     /// 装配层泄漏的 `Box<PanelRuntime>`。
     pub runtime: RefCell<Option<*mut PanelRuntime>>,
     pub ax_hint_shown: RefCell<bool>,
+    /// AX 授权弹框只触发一次（confirm 首次未授权时）。
+    pub ax_prompt_shown: RefCell<bool>,
     /// 设置窗口单例（首次打开时创建并泄漏）。
     pub settings: RefCell<Option<&'static settings::SettingsWindow>>,
 }
@@ -179,8 +181,15 @@ impl Globals {
             p.hide();
         }
         if matches!(self.config.borrow().paste.mode, PasteMode::Auto) {
-            let trusted = paste_back::is_ax_trusted();
             let mode = self.config.borrow().paste.mode;
+            let mut trusted = paste_back::is_ax_trusted();
+            // 首次未授权：触发系统授权弹框（AXIsProcessTrustedWithOptions prompt，
+            // 仅此一次；之后经横幅按钮 / 系统设置授权，is_ax_trusted 即转正常路径）
+            if !trusted && !*self.ax_prompt_shown.borrow() {
+                *self.ax_prompt_shown.borrow_mut() = true;
+                trusted = paste_back::request_ax_permission();
+                tracing::info!("paste-back: 已触发系统辅助功能授权弹框，granted_now={trusted}");
+            }
             tracing::info!("paste-back: ax_trusted={} mode={:?}", trusted, mode);
             if trusted {
                 match paste_back::send_cmd_v() {
@@ -193,7 +202,7 @@ impl Globals {
                 if !*hinted {
                     *hinted = true;
                     tracing::info!(
-                        "提示：系统设置 → 隐私与安全性 → 辅助功能 中勾选 ClipHub 后可自动粘贴"
+                        "提示：系统设置 → 隐私与安全性 → 辅助功能 中勾选 GlassClip 后可自动粘贴"
                     );
                 }
             }
@@ -431,8 +440,14 @@ define_class!(
         unsafe fn window_will_return_field_editor(
             &self,
             _sender: &NSWindow,
-            _client: &AnyObject,
+            client: &AnyObject,
         ) -> *mut AnyObject {
+            // 仅搜索框走自定义 field editor（键盘路由核心）；
+            // 预览 NSTextView 等其余 client 返回 null，走系统默认编辑器
+            // （否则绑死搜索框的 editor 会破坏预览文本的鼠标选中行为）
+            if client.downcast_ref::<NSSearchField>().is_none() {
+                return std::ptr::null_mut();
+            }
             match self.ivars().field_editor.borrow().as_ref() {
                 Some(fe) => Retained::as_ptr(fe) as *mut AnyObject,
                 None => std::ptr::null_mut(),
@@ -600,14 +615,15 @@ impl PanelController {
                 cv.addSubview(&separator);
             }
 
-            // AX 未授权横幅：覆盖面板顶部（最后添加 → 最上层），默认隐藏
+            // AX 未授权横幅：面板底部（最后添加 → 最上层），默认隐藏；
+            // 动态 accent 淡底 + labelColor 文字，深浅色都协调
             let banner = NSView::initWithFrame(
                 NSView::alloc(mtm),
-                rect(0.0, height - BANNER_HEIGHT, PANEL_WIDTH, BANNER_HEIGHT),
+                rect(0.0, 0.0, PANEL_WIDTH, BANNER_HEIGHT),
             );
             banner.setWantsLayer(true);
             if let Some(layer) = banner.layer() {
-                let bg = NSColor::separatorColor().colorWithAlphaComponent(0.9);
+                let bg = NSColor::controlAccentColor().colorWithAlphaComponent(0.15);
                 layer.setBackgroundColor(Some(&bg.CGColor()));
             }
             let hint = NSTextField::labelWithString(
@@ -615,7 +631,7 @@ impl PanelController {
                 mtm,
             );
             hint.setFont(Some(&NSFont::systemFontOfSize(11.0)));
-            hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            hint.setTextColor(Some(&NSColor::labelColor()));
             hint.setFrame(rect(12.0, (BANNER_HEIGHT - 14.0) / 2.0, 236.0, 14.0));
             banner.addSubview(&hint);
             let open = NSButton::initWithFrame(

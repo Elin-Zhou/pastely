@@ -62,6 +62,7 @@ name = "cliphub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "core-foundation",
  "core-graphics",
  "core-graphics-types",
  "dirs",

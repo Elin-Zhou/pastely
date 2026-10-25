@@ -8,8 +8,9 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSBackingStoreType, NSBezelStyle, NSButton, NSColor, NSFont, NSGlassEffectView,
-    NSGlassEffectViewStyle, NSPopUpButton, NSTextField, NSWindow, NSWindowStyleMask,
+    NSAlert, NSApplication, NSBackingStoreType, NSBezelStyle, NSButton, NSColor, NSFont,
+    NSGlassEffectView, NSGlassEffectViewStyle, NSPopUpButton, NSTextField, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::NSString;
@@ -120,12 +121,15 @@ impl SettingsWindow {
 
 /// 打开设置窗口（单例复用；每次打开回填当前配置）。
 pub fn show(globals: &'static super::Globals, controller: &AppController) {
+    // Accessory 应用未激活时，普通窗口会排在当前前台应用的所有窗口之后：
+    // 先激活自身再 makeKey，保证设置窗口置顶可见（复用与首次两个分支都需要）
+    let mtm = MainThreadMarker::new().expect("main thread");
+    NSApplication::sharedApplication(mtm).activate();
     if let Some(w) = *globals.settings.borrow() {
         w.refill(&globals.config.borrow());
         w.window.makeKeyAndOrderFront(None);
         return;
     }
-    let mtm = MainThreadMarker::new().expect("main thread");
     let w = unsafe { build(mtm, controller) };
     w.refill(&globals.config.borrow());
     w.window.center();
