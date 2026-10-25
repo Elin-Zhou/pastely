@@ -10,8 +10,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use objc2::MainThreadMarker;
-use objc2_app_kit::NSApplication;
+use objc2::msg_send;
+use objc2::rc::Retained;
+use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication};
 
 use cliphub::clipboard::WatcherState;
 use cliphub::config::Config;
@@ -23,7 +25,22 @@ use cliphub::ttl::reap_once;
 fn data_dir() -> PathBuf {
     dirs::config_dir()
         .expect("无法定位用户配置目录")
-        .join("cliphub")
+        .join("Pastely")
+}
+
+/// 旧数据目录（`.../cliphub`）整体迁移到新目录；仅当新目录不存在且旧目录存在。
+/// 返回是否发生迁移。迁移失败时调用方以空历史照常启动。
+fn migrate_data_dir(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<bool> {
+    if new.exists() || !old.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = new.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::rename(old, new)?;
+    Ok(true)
 }
 
 fn init_logging(dir: &std::path::Path) {
@@ -57,6 +74,23 @@ fn open_store(db_path: &std::path::Path) -> ClipStore {
 
 fn main() -> anyhow::Result<()> {
     let dir = data_dir();
+    // 目录改名迁移（先于 create_dir_all：新目录存在即跳过，幂等）
+    let legacy_dir = dirs::config_dir()
+        .expect("无法定位用户配置目录")
+        .join("cliphub");
+    match migrate_data_dir(&legacy_dir, &dir) {
+        Ok(true) => tracing::info!(
+            "migrated data dir {} -> {}",
+            legacy_dir.display(),
+            dir.display()
+        ),
+        Ok(false) => {}
+        Err(e) => tracing::error!(
+            "数据目录迁移失败（{} -> {}）：{e}；将以空历史启动",
+            legacy_dir.display(),
+            dir.display()
+        ),
+    }
     std::fs::create_dir_all(&dir).expect("创建数据目录失败");
     init_logging(&dir);
     tracing::info!("ClipHub 启动，数据目录 {}", dir.display());
@@ -149,6 +183,39 @@ fn main() -> anyhow::Result<()> {
         // 状态栏
         cliphub::panel::build_status_bar();
 
+        // 首次启动：一次性询问开机自启动（run 前同步弹，选完再进事件循环）
+        if !config.general.first_run_done {
+            let alert: Retained<NSAlert> = msg_send![NSAlert::alloc(mtm), init];
+            alert.setMessageText(&objc2_foundation::NSString::from_str(
+                "Pastely 需要在后台记录剪切板历史",
+            ));
+            alert.setInformativeText(&objc2_foundation::NSString::from_str(
+                "Pastely 常驻菜单栏监听剪切板变化，开机自启动可确保重启后不漏记录。\n可随时在「设置…」中更改。",
+            ));
+            // 第一个按钮为默认高亮（NSAlertFirstButtonReturn=1000）
+            alert.addButtonWithTitle(&objc2_foundation::NSString::from_str("开启开机自启动"));
+            alert.addButtonWithTitle(&objc2_foundation::NSString::from_str("暂不"));
+            let enable = alert.runModal() == NSAlertFirstButtonReturn;
+            let mut registered = false;
+            if enable {
+                match cliphub::autostart::set_launch_at_login(true) {
+                    Ok(()) => registered = true,
+                    Err(e) => tracing::error!("设置开机自启动失败（可稍后在设置中重试）: {e:#}"),
+                }
+            }
+            tracing::info!("首次启动选择：launch_at_login={enable} registered={registered}");
+            {
+                let mut cfg = globals.config.borrow_mut();
+                cfg.general.first_run_done = true;
+                cfg.general.launch_at_login = registered;
+            }
+            globals
+                .config
+                .borrow()
+                .save(&config_path)
+                .map_err(|e| anyhow::anyhow!("保存首次启动配置失败: {e}"))?;
+        }
+
         // TTL 启动清理一次
         {
             let store = globals.store.lock().expect("store poisoned");
@@ -165,4 +232,43 @@ fn main() -> anyhow::Result<()> {
         app.run();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_moves_legacy_dir() {
+        let base = std::env::temp_dir().join(format!("pastely-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let old = base.join("cliphub");
+        let new = base.join("Pastely");
+        std::fs::create_dir_all(old.join("nested")).unwrap();
+        std::fs::write(
+            old.join("config.toml"),
+            "[general]\nfirst_run_done = true\n",
+        )
+        .unwrap();
+        assert!(migrate_data_dir(&old, &new).unwrap());
+        assert!(!old.exists(), "旧目录整体改名");
+        assert!(new.join("config.toml").exists(), "内容随目录迁移");
+        assert!(!migrate_data_dir(&old, &new).unwrap(), "已迁移后幂等跳过");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn migration_skips_when_new_exists_or_old_missing() {
+        let base = std::env::temp_dir().join(format!("pastely-mig2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let old = base.join("cliphub");
+        let new = base.join("Pastely");
+        assert!(!migrate_data_dir(&old, &new).unwrap(), "旧目录不存在：跳过");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(new.join("keep"), "x").unwrap();
+        assert!(!migrate_data_dir(&old, &new).unwrap(), "新目录已存在：跳过");
+        assert!(old.exists(), "旧目录保留不动");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }

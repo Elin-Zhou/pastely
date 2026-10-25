@@ -2,6 +2,7 @@
 //!
 //! 本 crate 刻意不依赖 macOS UI 框架；AppKit 装配层（bin）位于 `src/main.rs`。
 
+pub mod autostart;
 pub mod clipboard;
 pub mod config;
 pub mod hotkey;

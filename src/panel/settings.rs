@@ -9,9 +9,9 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSBackingStoreType, NSBeep, NSBezelStyle, NSButton, NSColor, NSEvent,
-    NSEventModifierFlags, NSFont, NSGlassEffectView, NSGlassEffectViewStyle, NSPopUpButton,
-    NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSAlert, NSApplication, NSBackingStoreType, NSBeep, NSBezelStyle, NSButton, NSButtonType,
+    NSColor, NSEvent, NSEventModifierFlags, NSFont, NSGlassEffectView, NSGlassEffectViewStyle,
+    NSPopUpButton, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::NSString;
@@ -21,7 +21,7 @@ use crate::config::{Config, PasteMode};
 
 /// 窗口尺寸。
 pub const SETTINGS_WIDTH: f64 = 400.0;
-pub const SETTINGS_HEIGHT: f64 = 376.0;
+pub const SETTINGS_HEIGHT: f64 = 412.0;
 /// 顶部内缩：FullSizeContentView 下红绿灯画在内容区左上，表单整体下移避开。
 const TOP_INSET: f64 = 36.0;
 
@@ -139,6 +139,7 @@ fn vk_to_key_name(key_code: u16, chars: &str) -> Option<String> {
 /// 设置窗口 + 表单控件句柄（泄漏单例，主线程访问）。
 pub struct SettingsWindow {
     pub window: Retained<NSWindow>,
+    launch_btn: Retained<NSButton>,
     hotkey_field: Retained<HotkeyRecorderField>,
     ttl_field: Retained<NSTextField>,
     capacity_field: Retained<NSTextField>,
@@ -150,6 +151,11 @@ pub struct SettingsWindow {
 impl SettingsWindow {
     /// 每次打开时从当前 config 回填控件。
     fn refill(&self, config: &Config) {
+        self.launch_btn.setState(if config.general.launch_at_login {
+            objc2_app_kit::NSControlStateValueOn
+        } else {
+            objc2_app_kit::NSControlStateValueOff
+        });
         self.hotkey_field
             .setStringValue(&NSString::from_str(&config.hotkey.main));
         self.ttl_field
@@ -183,6 +189,10 @@ impl SettingsWindow {
     }
 
     // —— 保存时读值（AppController::saveSettings: 调用）——
+
+    pub(crate) fn launch_checked(&self) -> bool {
+        self.launch_btn.state() == objc2_app_kit::NSControlStateValueOn
+    }
 
     pub(crate) fn hotkey_string(&self) -> String {
         self.hotkey_field.stringValue().to_string()
@@ -287,7 +297,25 @@ pub fn save(globals: &'static super::Globals) {
         }
     };
 
+    let launch_now = w.launch_checked();
+    let launch_prev = globals.config.borrow().general.launch_at_login;
+    if launch_now != launch_prev {
+        if let Err(e) = crate::autostart::set_launch_at_login(launch_now) {
+            show_error(
+                "开机自启动设置失败",
+                &format!("{e:#}\n（cargo run 直跑时不可用；请使用打包后的 Pastely.app）"),
+            );
+            return;
+        }
+        tracing::info!(
+            "开机自启动已{}（SMAppService）",
+            if launch_now { "开启" } else { "关闭" }
+        );
+    }
+
     let mut cfg = globals.config.borrow().clone();
+    cfg.general.launch_at_login = launch_now;
+    cfg.general.first_run_done = true;
     cfg.hotkey.main = hotkey;
     cfg.storage.ttl_days = ttl_days;
     cfg.storage.max_items = max_items;
@@ -407,6 +435,11 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
             )
         };
 
+        // 0. 开机自启动（checkbox，Switch 样式）
+        let launch_btn =
+            NSButton::initWithFrame(NSButton::alloc(mtm), rect(158.0, row_y(0), 226.0, 24.0));
+        launch_btn.setTitle(&NSString::from_str(""));
+        launch_btn.setButtonType(NSButtonType::Switch);
         // 1. 快捷键（录制控件：点击后按组合键捕获）
         let hotkey_alloc = HotkeyRecorderField::alloc(mtm).set_ivars(HotkeyRecorderIvars);
         let hotkey_field: Retained<HotkeyRecorderField> = msg_send![super(hotkey_alloc), initWithFrame: rect(
@@ -419,20 +452,20 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
         hotkey_field.setEditable(false);
         hotkey_field.setSelectable(false);
         // 2. 失效周期（天，0=永久）
-        let ttl_field = field("0 = 永久", row_y(1), 226.0);
+        let ttl_field = field("0 = 永久", row_y(2), 226.0);
         // 3. 容量上限（条）
-        let capacity_field = field("1000", row_y(2), 226.0);
+        let capacity_field = field("1000", row_y(3), 226.0);
         // 4. 粘贴模式
-        let paste_popup = popup(row_y(3));
+        let paste_popup = popup(row_y(4));
         // 5. 主题
-        let theme_popup = popup(row_y(4));
+        let theme_popup = popup(row_y(5));
         // 6. 列表行数（旁注：下次启动生效）
-        let rows_field = field("10", row_y(5), 80.0);
+        let rows_field = field("10", row_y(6), 80.0);
         let rows_note = {
             let n = NSTextField::labelWithString(&NSString::from_str("下次启动生效"), mtm);
             n.setFont(Some(&NSFont::systemFontOfSize(10.0)));
             n.setTextColor(Some(&NSColor::secondaryLabelColor()));
-            n.setFrame(rect(246.0, row_y(5) + 5.0, 138.0, 14.0));
+            n.setFrame(rect(246.0, row_y(6) + 5.0, 138.0, 14.0));
             n
         };
 
@@ -476,16 +509,18 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
             cv.addSubview(&form);
         }
         for (text, y) in [
-            ("快捷键", row_y(0)),
-            ("失效周期（天，0=永久）", row_y(1)),
-            ("容量上限（条）", row_y(2)),
-            ("粘贴模式", row_y(3)),
-            ("主题", row_y(4)),
-            ("列表行数", row_y(5)),
+            ("开机自启动", row_y(0)),
+            ("快捷键", row_y(1)),
+            ("失效周期（天，0=永久）", row_y(2)),
+            ("容量上限（条）", row_y(3)),
+            ("粘贴模式", row_y(4)),
+            ("主题", row_y(5)),
+            ("列表行数", row_y(6)),
         ] {
             let l = label(text, y);
             form.addSubview(&l);
         }
+        form.addSubview(&launch_btn);
         form.addSubview(&hotkey_field);
         form.addSubview(&ttl_field);
         form.addSubview(&capacity_field);
@@ -499,6 +534,7 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
 
         SettingsWindow {
             window,
+            launch_btn,
             hotkey_field,
             ttl_field,
             capacity_field,

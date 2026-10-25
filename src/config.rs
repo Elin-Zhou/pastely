@@ -5,10 +5,21 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// 顶层配置（`[hotkey]` / `[storage]` / `[paste]` / `[ui]` 四节）。
+/// `[general]` 节。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeneralConfig {
+    /// 开机自启动（SMAppService LoginItem）。
+    pub launch_at_login: bool,
+    /// 首次启动询问已展示（只问一次）。
+    pub first_run_done: bool,
+}
+
+/// 顶层配置（`[general]` / `[hotkey]` / `[storage]` / `[paste]` / `[ui]` 五节）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub general: GeneralConfig,
     pub hotkey: HotkeyConfig,
     pub storage: StorageConfig,
     pub paste: PasteConfig,
@@ -148,6 +159,8 @@ mod tests {
     #[test]
     fn defaults_match_spec_exactly() {
         let c = Config::default();
+        assert!(!c.general.launch_at_login);
+        assert!(!c.general.first_run_done);
         assert_eq!(c.hotkey.main, "Ctrl+Cmd+V");
         assert_eq!(c.storage.ttl_days, 30);
         assert_eq!(c.storage.max_items, 1000);
@@ -183,6 +196,9 @@ mod tests {
         cleanup(&path);
         Config::default().save(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("[general]"), "raw:\n{raw}");
+        assert!(raw.contains("launch_at_login = false"), "raw:\n{raw}");
+        assert!(raw.contains("first_run_done = false"), "raw:\n{raw}");
         assert!(raw.contains("main = \"Ctrl+Cmd+V\""), "raw:\n{raw}");
         assert!(raw.contains("ttl_days = 30"));
         assert!(raw.contains("max_items = 1000"));
@@ -241,6 +257,19 @@ mod tests {
         cleanup(&path);
         std::fs::write(&path, "[storage]\nttl_days = \"thirty\"\n").unwrap();
         assert!(Config::load(&path).is_err());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn load_file_without_general_section_fills_defaults() {
+        // 旧版本配置文件缺 [general] 节：serde default 自动补齐
+        let path = tmp_config("no-general");
+        cleanup(&path);
+        std::fs::write(&path, "[storage]\nttl_days = 3\n").unwrap();
+        let c = Config::load(&path).unwrap();
+        assert_eq!(c.storage.ttl_days, 3);
+        assert!(!c.general.launch_at_login);
+        assert!(!c.general.first_run_done);
         cleanup(&path);
     }
 
