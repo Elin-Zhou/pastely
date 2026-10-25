@@ -8,6 +8,7 @@ macOS 剪贴板历史管理器：菜单栏常驻，全局快捷键唤起液态�
 
 ```bash
 brew tap elin-zhou/pastely
+brew trust elin-zhou/pastely
 brew install --cask pastely
 ```
 
