@@ -19,7 +19,7 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeyConfig {
-    /// 主弹窗快捷键（`parse_hotkey` 可解析的格式，如 `"Cmd+Shift+V"`）。
+    /// 主弹窗快捷键（`parse_hotkey` 可解析的格式，如 `"Ctrl+Cmd+V"`）。
     pub main: String,
 }
 
@@ -65,7 +65,7 @@ pub enum PasteMode {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
-            main: "Cmd+Shift+V".to_string(),
+            main: "Ctrl+Cmd+V".to_string(),
         }
     }
 }
@@ -92,7 +92,7 @@ impl Default for PasteConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            max_list_rows: 12,
+            max_list_rows: 10,
             theme: "auto".to_string(),
         }
     }
@@ -148,13 +148,13 @@ mod tests {
     #[test]
     fn defaults_match_spec_exactly() {
         let c = Config::default();
-        assert_eq!(c.hotkey.main, "Cmd+Shift+V");
+        assert_eq!(c.hotkey.main, "Ctrl+Cmd+V");
         assert_eq!(c.storage.ttl_days, 30);
         assert_eq!(c.storage.max_items, 1000);
         assert_eq!(c.storage.max_text_chars, 100_000);
         assert_eq!(c.storage.max_image_mb, 10);
         assert_eq!(c.paste.mode, PasteMode::Auto);
-        assert_eq!(c.ui.max_list_rows, 12);
+        assert_eq!(c.ui.max_list_rows, 10);
         assert_eq!(c.ui.theme, "auto");
     }
 
@@ -183,13 +183,13 @@ mod tests {
         cleanup(&path);
         Config::default().save(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("main = \"Cmd+Shift+V\""), "raw:\n{raw}");
+        assert!(raw.contains("main = \"Ctrl+Cmd+V\""), "raw:\n{raw}");
         assert!(raw.contains("ttl_days = 30"));
         assert!(raw.contains("max_items = 1000"));
         assert!(raw.contains("max_text_chars = 100000"));
         assert!(raw.contains("max_image_mb = 10"));
         assert!(raw.contains("mode = \"auto\""));
-        assert!(raw.contains("max_list_rows = 12"));
+        assert!(raw.contains("max_list_rows = 10"));
         assert!(raw.contains("theme = \"auto\""));
         cleanup(&path);
     }
@@ -261,7 +261,7 @@ mod tests {
         std::fs::write(&path, "[storage]\nttl_days = 1\n").unwrap();
         let c = Config::load(&path).unwrap();
         assert_eq!(c.storage.ttl_days, 1);
-        assert_eq!(c.hotkey.main, "Cmd+Shift+V");
+        assert_eq!(c.hotkey.main, "Ctrl+Cmd+V");
         assert_eq!(c.storage.max_items, 1000);
         assert_eq!(c.paste.mode, PasteMode::Auto);
         cleanup(&path);

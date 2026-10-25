@@ -12,12 +12,14 @@ use objc2_app_kit::{NSEvent, NSTextInputClient, NSTextView};
 
 use super::PanelRuntime;
 
-// 虚拟键码（HID）：Up=126 Down=125 Return=36 Enter=76 Escape=53
+// 虚拟键码（HID）：Up=126 Down=125 Return=36 Enter=76 Escape=53；顶部数字 1-9=18..=26
 const K_UP: u16 = 126;
 const K_DOWN: u16 = 125;
 const K_RETURN: u16 = 36;
 const K_ENTER: u16 = 76;
 const K_ESCAPE: u16 = 53;
+const K_NUM_1: u16 = 18;
+const K_NUM_9: u16 = 26;
 
 define_class!(
     // SAFETY: NSTextView 无子类化约束；本类型不实现 Drop。
@@ -40,6 +42,11 @@ define_class!(
             // SAFETY: 共享引用即可（方法全部走 &self），避免与 Globals::runtime()
             // 重新派生的 &mut PanelRuntime 构成双重可变别名
             let runtime: &PanelRuntime = unsafe { &*(*self.ivars()) };
+            // 数字键直达：顶部数字 1-9 确认对应行；越界/空列表时透传系统
+            if (K_NUM_1..=K_NUM_9).contains(&key) && runtime.confirm_at((key - K_NUM_1) as usize)
+            {
+                return;
+            }
             match key {
                 K_UP => runtime.move_selection(-1),
                 K_DOWN => runtime.move_selection(1),

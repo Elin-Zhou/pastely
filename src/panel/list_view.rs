@@ -5,7 +5,7 @@ use objc2::AnyThread;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSColor, NSFont, NSImage, NSImageView,
-    NSLineBreakMode, NSTableCellView, NSTextField,
+    NSLineBreakMode, NSTableCellView, NSTextAlignment, NSTextField,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSMutableAttributedString, NSString};
@@ -13,11 +13,15 @@ use objc2_foundation::{NSMutableAttributedString, NSString};
 use crate::model::{ClipKind, SearchableItem};
 
 /// 行高（pt）。
-pub const ROW_HEIGHT: f64 = 36.0;
+pub const ROW_HEIGHT: f64 = 32.0;
 /// 图片缩略图边长（pt）。
 pub const THUMB_SIZE: f64 = 28.0;
 /// 时间列宽（pt）。
-pub const META_WIDTH: f64 = 84.0;
+pub const META_WIDTH: f64 = 72.0;
+/// 行首序号徽章宽度（pt）。
+pub const BADGE_WIDTH: f64 = 18.0;
+/// 内容区（文本/缩略图）起始 x（徽章 6 + 18 + 2 间隙）。
+pub const CONTENT_X: f64 = 26.0;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
@@ -88,7 +92,7 @@ pub unsafe fn highlighted_preview(
     }
 }
 
-/// 构造一行 view-based 单元格。
+/// 构造一行 view-based 单元格（左栏 320pt 宽；`index` 用于行首序号徽章）。
 ///
 /// # Safety
 ///
@@ -96,6 +100,7 @@ pub unsafe fn highlighted_preview(
 pub unsafe fn build_row(
     mtm: MainThreadMarker,
     view_width: f64,
+    index: usize,
     item: &SearchableItem,
     char_indices: &[usize],
     png_bytes: Option<&[u8]>,
@@ -103,10 +108,34 @@ pub unsafe fn build_row(
 ) -> Retained<NSTableCellView> {
     unsafe {
         let cell = NSTableCellView::new(mtm);
+
+        // 行首序号徽章：1-9 数字（⌘N 直达的视觉对应），第 10 行及以后为空
+        let badge_text: String = if index < 9 {
+            (index + 1).to_string()
+        } else {
+            String::new()
+        };
+        let badge = NSTextField::labelWithString(&NSString::from_str(&badge_text), mtm);
+        badge.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+        badge.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        badge.setAlignment(NSTextAlignment::Center);
+        badge.setFrame(rect(6.0, (ROW_HEIGHT - 14.0) / 2.0, BADGE_WIDTH, 14.0));
+        cell.addSubview(&badge);
+
+        // 行级选中高亮（Text/Image 统一：cell layer 背景，图片行同样有反馈）
+        if selected {
+            cell.setWantsLayer(true);
+            if let Some(layer) = cell.layer() {
+                let soft = NSColor::controlAccentColor().colorWithAlphaComponent(0.18);
+                layer.setBackgroundColor(Some(&soft.CGColor()));
+                layer.setCornerRadius(4.0);
+            }
+        }
+
         let right = 8.0;
         match item.kind {
             ClipKind::Image => {
-                let mut x = 6.0;
+                let mut x = CONTENT_X;
                 if let Some(bytes) = png_bytes {
                     let data = objc2_foundation::NSData::dataWithBytes_length(
                         bytes.as_ptr().cast(),
@@ -136,7 +165,7 @@ pub unsafe fn build_row(
                 label.setFont(Some(&NSFont::systemFontOfSize(12.0)));
                 label.setFrame(rect(
                     x,
-                    9.0,
+                    (ROW_HEIGHT - 18.0) / 2.0,
                     (view_width - x - META_WIDTH - right).max(40.0),
                     18.0,
                 ));
@@ -151,15 +180,10 @@ pub unsafe fn build_row(
                     &item.text_preview,
                     char_indices,
                 ));
-                if selected {
-                    let soft = NSColor::controlAccentColor().colorWithAlphaComponent(0.18);
-                    label.setBackgroundColor(Some(&soft));
-                    label.setDrawsBackground(true);
-                }
                 label.setFrame(rect(
-                    8.0,
-                    9.0,
-                    (view_width - 8.0 - META_WIDTH - right).max(40.0),
+                    CONTENT_X,
+                    (ROW_HEIGHT - 18.0) / 2.0,
+                    (view_width - CONTENT_X - META_WIDTH - right).max(40.0),
                     18.0,
                 ));
                 cell.addSubview(&label);
@@ -174,7 +198,7 @@ pub unsafe fn build_row(
         time.setTextColor(Some(&NSColor::secondaryLabelColor()));
         time.setFrame(rect(
             view_width - META_WIDTH - right,
-            10.0,
+            (ROW_HEIGHT - 16.0) / 2.0,
             META_WIDTH,
             16.0,
         ));

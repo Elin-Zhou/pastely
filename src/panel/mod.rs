@@ -4,7 +4,8 @@
 //! - [`Globals`]：泄漏一次的全局状态（store/config/watcher/hotkey/panel/runtime 句柄）
 //! - [`AppController`]：NSObject 子类，承载全部 NSTimer tick、状态栏菜单动作与
 //!   window/搜索框 delegate 协议
-//! - [`PanelController`]：非激活 NSPanel + 搜索框 + 列表容器
+//! - [`PanelController`]：非激活 NSPanel，左右分栏——左列搜索框 + 列表、
+//!   右列预览区；液态玻璃底（NSVisualEffectView）+ 深浅色自适应
 //! - [`PanelRuntime`]：field editor 键盘回调访问的列表选择状态
 //!
 //! 非激活面板保证唤起时原应用不失活——粘贴回填 `CGEventPost` 直接落回原应用。
@@ -20,17 +21,19 @@ use objc2::define_class;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
-use objc2::MainThreadOnly;
-use objc2::{DefinedClass, MainThreadMarker};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertSecondButtonReturn, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSBackingStoreType, NSColor, NSControlTextEditingDelegate, NSMenu,
-    NSMenuItem, NSPanel, NSScreen, NSSearchField, NSSearchFieldDelegate, NSStatusBar,
-    NSTableCellView, NSTextFieldDelegate, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
-    NSWorkspace,
+    NSAlert, NSAlertSecondButtonReturn, NSAppearance, NSAppearanceCustomization, NSAppearanceName,
+    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSBackingStoreType, NSBox, NSBoxType, NSColor,
+    NSControlTextEditingDelegate, NSFont, NSImage, NSImageView, NSMenu, NSMenuItem, NSPanel,
+    NSScreen, NSSearchField, NSSearchFieldDelegate, NSStatusBar, NSTableCellView, NSTextAlignment,
+    NSTextField, NSTextFieldDelegate, NSTextView, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::{NSNotification, NSObjectProtocol, NSString};
+use objc2_foundation::{NSData, NSNotification, NSObjectProtocol, NSString};
 
 use crate::clipboard::{self, WatcherState};
 use crate::config::PasteMode;
@@ -43,9 +46,11 @@ use list_view::{build_row, ROW_HEIGHT};
 use search_field::PanelFieldEditor;
 
 /// 面板宽度（pt）。
-pub const PANEL_WIDTH: f64 = 680.0;
-/// 搜索栏高度（pt）。
-pub const SEARCH_BAR_HEIGHT: f64 = 44.0;
+pub const PANEL_WIDTH: f64 = 660.0;
+/// 左栏（搜索框 + 列表）宽度（pt）；右栏预览区宽 = PANEL_WIDTH - LIST_WIDTH - 1。
+pub const LIST_WIDTH: f64 = 320.0;
+/// 搜索栏高度（pt，面板顶部区域）。
+pub const SEARCH_BAR_HEIGHT: f64 = 40.0;
 /// 上下边距（pt）。
 pub const PANEL_PADDING: f64 = 8.0;
 
@@ -117,6 +122,21 @@ impl Globals {
                 store.image_bytes(id).unwrap_or(None)
             });
         }
+    }
+
+    /// 数字键直达：选中并确认第 `index` 行（0-based）。
+    ///
+    /// 越界/空列表返回 false（field editor 据此把按键透传给系统）。
+    pub fn confirm_at(&self, index: usize) -> bool {
+        let Some(rt) = self.runtime() else {
+            return false;
+        };
+        if index >= rt.filtered.len() {
+            return false;
+        }
+        rt.selected = index;
+        self.confirm();
+        true
     }
 
     /// 确认当前选择：写剪切板 → 隐藏 → 防回环 → （auto 且已授权）模拟 ⌘V。
@@ -211,6 +231,11 @@ impl PanelRuntime {
 
     pub fn confirm_current(&self) {
         self.globals().confirm();
+    }
+
+    /// 数字键直达：确认第 `index` 行；越界/空列表返回 false。
+    pub fn confirm_at(&self, index: usize) -> bool {
+        self.globals().confirm_at(index)
     }
 
     pub fn hide(&self) {
@@ -411,6 +436,8 @@ pub struct PanelController {
     pub panel: Retained<NSPanel>,
     pub search_field: Retained<NSSearchField>,
     pub list_container: Retained<NSView>,
+    /// 右栏预览区（分栏布局）。
+    pub preview_container: Retained<NSView>,
     rows: RefCell<Vec<Retained<NSTableCellView>>>,
 }
 
@@ -418,7 +445,11 @@ pub struct PanelController {
 pub type ImageLoader<'a> = &'a dyn Fn(i64) -> Option<Vec<u8>>;
 
 impl PanelController {
-    /// 创建非激活面板（搜索框 + 列表容器）并挂 window delegate。
+    /// 创建非激活面板（左右分栏：搜索框 + 列表 | 预览区）并挂 window delegate。
+    ///
+    /// 面板尺寸 `PANEL_WIDTH × (SEARCH_BAR_HEIGHT + rows×ROW_HEIGHT + 16)`，
+    /// 默认 10 行 = 660×376。液态玻璃底由铺满 contentView 的
+    /// [`NSVisualEffectView`] 承担（圆角 12，窗口本体透明）。
     ///
     /// # Safety
     ///
@@ -453,17 +484,33 @@ impl PanelController {
             panel.setLevel(objc2_app_kit::NSFloatingWindowLevel);
             panel.setReleasedWhenClosed(false);
             panel.setHidesOnDeactivate(false);
-            panel.setBackgroundColor(Some(&NSColor::windowBackgroundColor()));
+            // 玻璃面板：窗口本体透明，视觉全部由 effect view 承担
+            panel.setOpaque(false);
+            panel.setBackgroundColor(Some(&NSColor::clearColor()));
             panel.setDelegate(Some(ProtocolObject::from_ref(controller)));
 
+            // 液态玻璃底：hudWindow 材质 + behindWindow 混合 + active 态，
+            // layer 圆角 12 + masksToBounds 裁出玻璃圆角
+            let effects = NSVisualEffectView::initWithFrame(
+                NSVisualEffectView::alloc(mtm),
+                rect(0.0, 0.0, PANEL_WIDTH, height),
+            );
+            effects.setMaterial(NSVisualEffectMaterial::HUDWindow);
+            effects.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+            effects.setState(NSVisualEffectState::Active);
+            effects.setWantsLayer(true);
+            if let Some(layer) = effects.layer() {
+                layer.setCornerRadius(12.0);
+                layer.setMasksToBounds(true);
+            }
+            if let Some(cv) = panel.contentView() {
+                cv.addSubview(&effects);
+            }
+
+            // 左栏：搜索框（顶部）
             let search = NSSearchField::initWithFrame(
                 NSSearchField::alloc(mtm),
-                rect(
-                    12.0,
-                    height - SEARCH_BAR_HEIGHT + 2.0,
-                    PANEL_WIDTH - 24.0,
-                    28.0,
-                ),
+                rect(12.0, height - 36.0, LIST_WIDTH - 24.0, 28.0),
             );
             search.setPlaceholderString(Some(&NSString::from_str("搜索剪切板历史…")));
             // 关键：delegate 指向 AppController，输入变化才会触发 controlTextDidChange:
@@ -472,12 +519,33 @@ impl PanelController {
                 cv.addSubview(&search);
             }
 
+            // 左栏：列表容器（其下铺到面板底）
             let list = NSView::initWithFrame(
                 NSView::alloc(mtm),
-                rect(0.0, 0.0, PANEL_WIDTH, rows_h + PANEL_PADDING),
+                rect(0.0, 0.0, LIST_WIDTH, rows_h + PANEL_PADDING * 2.0),
             );
             if let Some(cv) = panel.contentView() {
                 cv.addSubview(&list);
+            }
+
+            // 右栏：预览区 + 1pt 竖直分隔线（NSBox separator 随深浅色自适应）
+            let preview = NSView::initWithFrame(
+                NSView::alloc(mtm),
+                rect(
+                    LIST_WIDTH + 1.0,
+                    0.0,
+                    PANEL_WIDTH - LIST_WIDTH - 1.0,
+                    height,
+                ),
+            );
+            if let Some(cv) = panel.contentView() {
+                cv.addSubview(&preview);
+            }
+            let separator =
+                NSBox::initWithFrame(NSBox::alloc(mtm), rect(LIST_WIDTH, 0.0, 1.0, height));
+            separator.setBoxType(NSBoxType::Separator);
+            if let Some(cv) = panel.contentView() {
+                cv.addSubview(&separator);
             }
 
             // field editor：键盘路由核心（安装到 window delegate 的返回值）
@@ -488,6 +556,7 @@ impl PanelController {
                 panel,
                 search_field: search,
                 list_container: list,
+                preview_container: preview,
                 rows: RefCell::new(Vec::new()),
             }
         }
@@ -528,7 +597,7 @@ impl PanelController {
         self.panel.makeFirstResponder(Some(&self.search_field));
     }
 
-    /// 全量重建列表行并标注选中行。
+    /// 全量重建列表行并标注选中行；尾部同步刷新右栏预览。
     pub fn update_list(
         &self,
         rows: &[(SearchableItem, Vec<usize>)],
@@ -540,24 +609,119 @@ impl PanelController {
             for old in self.rows.borrow_mut().drain(..) {
                 old.removeFromSuperview();
             }
+            let mut selected_png: Option<Vec<u8>> = None;
             for (i, (item, highlights)) in rows.iter().enumerate() {
                 let png: Option<Vec<u8>> = match item.kind {
                     ClipKind::Image => load_image(item.id),
                     ClipKind::Text => None,
                 };
+                if i == selected {
+                    selected_png = png.clone();
+                }
                 let row = build_row(
                     mtm,
-                    PANEL_WIDTH,
+                    LIST_WIDTH,
+                    i,
                     item,
                     highlights,
                     png.as_deref(),
                     i == selected,
                 );
                 let y = (rows.len() - 1 - i) as f64 * ROW_HEIGHT;
-                row.setFrame(rect(0.0, y, PANEL_WIDTH, ROW_HEIGHT));
+                row.setFrame(rect(0.0, y, LIST_WIDTH, ROW_HEIGHT));
                 self.list_container.addSubview(&row);
                 self.rows.borrow_mut().push(row);
             }
+            // 预览区跟随当前选中行（空列表/越界 → 占位提示）
+            match rows.get(selected) {
+                Some((item, _)) => self.update_preview(Some(item), selected_png.as_deref()),
+                None => self.update_preview(None, None),
+            }
+        }
+    }
+
+    /// 渲染右栏预览：Text → 只读文本；Image → 居中缩放 + 尺寸/体积小字；空 → 占位提示。
+    ///
+    /// 文本颜色用系统动态色（labelColor/secondaryLabelColor），深浅色自动切换。
+    pub fn update_preview(&self, item: Option<&SearchableItem>, png: Option<&[u8]>) {
+        unsafe {
+            let mtm = MainThreadMarker::new().expect("main thread");
+            // 清空旧内容（subviews() 返回快照数组，边遍历边移除安全）
+            let subs = self.preview_container.subviews();
+            for sub in subs.iter() {
+                sub.removeFromSuperview();
+            }
+            let pw = PANEL_WIDTH - LIST_WIDTH - 1.0;
+            let ph = self.preview_container.frame().size.height;
+            let Some(item) = item else {
+                let hint =
+                    NSTextField::labelWithString(&NSString::from_str("输入以过滤剪切板历史"), mtm);
+                hint.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+                hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                hint.setAlignment(NSTextAlignment::Center);
+                hint.setFrame(rect(8.0, ph / 2.0 - 10.0, pw - 16.0, 20.0));
+                self.preview_container.addSubview(&hint);
+                return;
+            };
+            match item.kind {
+                ClipKind::Text => {
+                    let tv =
+                        NSTextView::initWithFrame(NSTextView::alloc(mtm), rect(0.0, 0.0, pw, ph));
+                    tv.setEditable(false);
+                    tv.setSelectable(true);
+                    tv.setDrawsBackground(false);
+                    tv.setRichText(false);
+                    tv.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+                    tv.setTextColor(Some(&NSColor::labelColor()));
+                    tv.setTextContainerInset(CGSize::new(8.0, 8.0));
+                    tv.setString(&NSString::from_str(&item.full_text));
+                    self.preview_container.addSubview(&tv);
+                }
+                ClipKind::Image => {
+                    if let Some(bytes) = png {
+                        let data = NSData::dataWithBytes_length(bytes.as_ptr().cast(), bytes.len());
+                        if let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) {
+                            let iv = NSImageView::new(mtm);
+                            iv.setImage(Some(&img));
+                            iv.setFrame(rect(0.0, 24.0, pw, (ph - 24.0).max(0.0)));
+                            iv.setImageScaling(
+                                objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown,
+                            );
+                            self.preview_container.addSubview(&iv);
+                        }
+                    }
+                    let (w, h) = item.img_size.unwrap_or((0, 0));
+                    let kb = png.map_or(0, |b| b.len() / 1024);
+                    let meta = NSTextField::labelWithString(
+                        &NSString::from_str(&format!("{w}×{h} · {kb} KB")),
+                        mtm,
+                    );
+                    meta.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+                    meta.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                    meta.setAlignment(NSTextAlignment::Center);
+                    meta.setFrame(rect(8.0, 4.0, pw - 16.0, 16.0));
+                    self.preview_container.addSubview(&meta);
+                }
+            }
+        }
+    }
+}
+
+/// 按 `ui.theme` 固定面板外观（`auto` 不设置：动态色自动跟随系统深浅色）。
+///
+/// # Safety
+///
+/// 必须在主线程调用。
+pub unsafe fn apply_panel_theme(panel: &NSPanel, theme: &str) {
+    let name: Option<&'static NSAppearanceName> = match theme {
+        "light" => Some(unsafe { NSAppearanceNameAqua }),
+        "dark" => Some(unsafe { NSAppearanceNameDarkAqua }),
+        _ => None,
+    };
+    if let Some(name) = name {
+        if let Some(appearance) = NSAppearance::appearanceNamed(name) {
+            // setAppearance 来自 NSAppearanceCustomization 协议（NSPanel 已声明 conforms）
+            panel.setAppearance(Some(&appearance));
         }
     }
 }

@@ -114,6 +114,9 @@ fn main() -> anyhow::Result<()> {
         )));
         *globals.panel.borrow_mut() = Some(panel);
 
+        // 主题：auto 跟随系统（动态色自动切换）；light/dark 固定 appearance
+        cliphub::panel::apply_panel_theme(&panel.panel, &config.ui.theme);
+
         // NSApp delegate（状态栏菜单 nil-targeted 动作经此分发）
         use objc2::runtime::ProtocolObject;
         app.setDelegate(Some(ProtocolObject::from_ref(&*controller)));
