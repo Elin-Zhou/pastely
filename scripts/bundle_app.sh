@@ -70,12 +70,64 @@ fi
 # ad-hoc 签名（本地运行免 Gatekeeper 阻断；分发需开发者证书另签）
 codesign --force -s - "$APP"
 
-# DMG：app + /Applications 链接（拖拽安装布局）
-mkdir -p "$DIST/staging"
-cp -R "$APP" "$DIST/staging/"
-ln -s /Applications "$DIST/staging/Applications"
-hdiutil create -volname "$APP_NAME" -srcfolder "$DIST/staging" -ov -quiet "$DIST/$APP_NAME-$VERSION.dmg"
-rm -rf "$DIST/staging"
+# DMG 设计化：AppKit 渲染背景图 → 可读写临时 DMG + Finder 图标布局 → 压缩只读成品
+BG_DIR="$DIST/.background_tmp"
+mkdir -p "$BG_DIR"
+cargo run --release --bin gen_dmg_bg -- "$BG_DIR/dmg_bg.png"
+
+rm -f "$DIST/tmp_rw.dmg"
+# 挂载点被占（用户开着旧 DMG）时，临时卷改用 -build 后缀名
+MNT="/Volumes/$APP_NAME"
+TEMP_VOL="$APP_NAME"
+if [ -e "$MNT" ]; then
+    echo "提示：$MNT 已被占用（旧 DMG 可能仍打开），临时卷改用 $APP_NAME-build" >&2
+    TEMP_VOL="$APP_NAME-build"
+    MNT="/Volumes/$TEMP_VOL"
+    hdiutil detach "$MNT" -force >/dev/null 2>&1 || true
+fi
+hdiutil create -size 64m -fs HFS+J -volname "$TEMP_VOL" -ov -quiet "$DIST/tmp_rw.dmg"
+hdiutil attach "$DIST/tmp_rw.dmg" -mountpoint "$MNT" -nobrowse -quiet
+
+cp -R "$APP" "$MNT/"
+ln -s /Applications "$MNT/Applications"
+mkdir -p "$MNT/.background"
+cp "$BG_DIR/dmg_bg.png" "$MNT/.background/dmg_bg.png"
+
+# Finder 布局：窗口尺寸对应背景图，图标摆在右区中部（避开标题与底部提示）
+# osascript 失败不中断打包（退化为普通 DMG 布局）
+osascript <<APPLESCRIPT || echo "警告：Finder 布局失败，退化为普通 DMG 布局" >&2
+tell application "Finder"
+  tell disk "$TEMP_VOL"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set bounds of container window to {100, 100, 1380, 900}
+    set viewOptions to icon view options of container window
+    set arrangement of viewOptions to not arranged
+    set icon size of viewOptions to 128
+    set background picture of viewOptions to file ".background:dmg_bg.png"
+    set position of item "$APP_NAME.app" of container window to {700, 330}
+    set position of item "Applications" of container window to {1020, 330}
+    close
+    open
+    update without registering applications
+  end tell
+end tell
+APPLESCRIPT
+sleep 2
+
+# 卸载：Finder 可能仍持有窗口，强卸 + 重试；仍失败则报错退出（保留现场）
+if ! hdiutil detach "$MNT" -force >/dev/null 2>&1; then
+    sleep 2
+    if ! hdiutil detach "$MNT" -force >/dev/null 2>&1; then
+        echo "警告：未能卸载 $MNT，跳过压缩（临时 DMG 保留在 $DIST/tmp_rw.dmg）" >&2
+        exit 1
+    fi
+fi
+hdiutil convert "$DIST/tmp_rw.dmg" -format UDZO -o "$DIST/$APP_NAME-$VERSION.dmg" -ov -quiet
+rm -f "$DIST/tmp_rw.dmg"
+rm -rf "$BG_DIR"
 
 echo
 echo "打包完成："
