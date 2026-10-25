@@ -13,6 +13,7 @@
 pub mod list_view;
 pub mod paste_back;
 pub mod search_field;
+pub mod settings;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -72,7 +73,8 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
 /// 泄漏一次的全局状态（全部主线程访问）。
 pub struct Globals {
     pub store: std::sync::Arc<std::sync::Mutex<ClipStore>>,
-    pub config: crate::config::Config,
+    /// 当前生效配置（设置窗口保存后原地更新，读点即时生效）。
+    pub config: RefCell<crate::config::Config>,
     pub config_path: PathBuf,
     pub watcher: RefCell<WatcherState>,
     pub hotkey: RefCell<HotkeyManager>,
@@ -80,6 +82,8 @@ pub struct Globals {
     /// 装配层泄漏的 `Box<PanelRuntime>`。
     pub runtime: RefCell<Option<*mut PanelRuntime>>,
     pub ax_hint_shown: RefCell<bool>,
+    /// 设置窗口单例（首次打开时创建并泄漏）。
+    pub settings: RefCell<Option<&'static settings::SettingsWindow>>,
 }
 
 impl Globals {
@@ -174,13 +178,10 @@ impl Globals {
         if let Some(p) = self.panel() {
             p.hide();
         }
-        if matches!(self.config.paste.mode, PasteMode::Auto) {
+        if matches!(self.config.borrow().paste.mode, PasteMode::Auto) {
             let trusted = paste_back::is_ax_trusted();
-            tracing::info!(
-                "paste-back: ax_trusted={} mode={:?}",
-                trusted,
-                self.config.paste.mode
-            );
+            let mode = self.config.borrow().paste.mode;
+            tracing::info!("paste-back: ax_trusted={} mode={:?}", trusted, mode);
             if trusted {
                 match paste_back::send_cmd_v() {
                     Ok(()) => tracing::info!("paste-back: Cmd+V 已投递（session tap）"),
@@ -316,14 +317,13 @@ define_class!(
         #[unsafe(method(tickTtl:))]
         fn tick_ttl(&self, _timer: Option<&AnyObject>) {
             let g = self.ivars().globals();
+            let (ttl_days, max_items) = {
+                let cfg = g.config.borrow();
+                (cfg.storage.ttl_days, cfg.storage.max_items)
+            };
             let (expired, evicted) = {
                 let store = g.store.lock().expect("store poisoned");
-                crate::ttl::reap_once(
-                    &store,
-                    g.config.storage.ttl_days,
-                    g.config.storage.max_items,
-                )
-                .unwrap_or((0, 0))
+                crate::ttl::reap_once(&store, ttl_days, max_items).unwrap_or((0, 0))
             };
             if expired + evicted > 0 {
                 tracing::info!("清理：TTL 过期 {expired} 条，容量淘汰 {evicted} 条");
@@ -333,6 +333,21 @@ define_class!(
         #[unsafe(method(showPanel:))]
         fn show_panel(&self, _sender: Option<&AnyObject>) {
             self.ivars().globals().show_panel();
+        }
+
+        #[unsafe(method(openSettings:))]
+        fn open_settings(&self, _sender: Option<&AnyObject>) {
+            settings::show(self.ivars().globals(), self);
+        }
+
+        #[unsafe(method(saveSettings:))]
+        fn save_settings(&self, _sender: Option<&AnyObject>) {
+            settings::save(self.ivars().globals());
+        }
+
+        #[unsafe(method(closeSettings:))]
+        fn close_settings(&self, _sender: Option<&AnyObject>) {
+            settings::close(self.ivars().globals());
         }
 
         #[unsafe(method(togglePause:))]
@@ -838,7 +853,8 @@ pub unsafe fn build_status_bar() {
             );
             menu.addItem(&mi);
         };
-        add(&menu, "显示 ClipHub", objc2::sel!(showPanel:), "");
+        add(&menu, "显示 GlassClip", objc2::sel!(showPanel:), "");
+        add(&menu, "设置…", objc2::sel!(openSettings:), ",");
         add(&menu, "暂停记录", objc2::sel!(togglePause:), "");
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add(&menu, "清空历史…", objc2::sel!(clearHistory:), "");
@@ -849,7 +865,7 @@ pub unsafe fn build_status_bar() {
             "",
         );
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add(&menu, "退出 ClipHub", objc2::sel!(quitApp:), "q");
+        add(&menu, "退出 GlassClip", objc2::sel!(quitApp:), "q");
         item.setMenu(Some(&menu));
         // 状态栏 item 进程生命周期持有
         std::mem::forget(item);

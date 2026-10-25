@@ -82,7 +82,7 @@ fn main() -> anyhow::Result<()> {
         // 全局状态（泄漏，进程生命周期）
         let globals: &'static Globals = Box::leak(Box::new(Globals {
             store: store.clone(),
-            config: config.clone(),
+            config: RefCell::new(config.clone()),
             config_path: config_path.clone(),
             watcher: RefCell::new(WatcherState::new(
                 config.storage.max_text_chars,
@@ -92,6 +92,7 @@ fn main() -> anyhow::Result<()> {
             panel: RefCell::new(None),
             runtime: RefCell::new(None),
             ax_hint_shown: RefCell::new(false),
+            settings: RefCell::new(None),
         }));
 
         // 运行时选择状态（泄漏，field editor 裸指针指向它）

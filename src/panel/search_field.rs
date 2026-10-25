@@ -8,11 +8,11 @@ use objc2::define_class;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSTextInputClient, NSTextView};
+use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSTextInputClient, NSTextView};
 
 use super::PanelRuntime;
 
-// 虚拟键码（HID）：Up=126 Down=125 Return=36 Enter=76 Escape=53；顶部数字 1-9=18..=26
+// 虚拟键码（HID）：Up=126 Down=125 Return=36 Enter=76 Escape=53；顶部数字 1-9=18..=26；逗号=43
 const K_UP: u16 = 126;
 const K_DOWN: u16 = 125;
 const K_RETURN: u16 = 36;
@@ -20,6 +20,7 @@ const K_ENTER: u16 = 76;
 const K_ESCAPE: u16 = 53;
 const K_NUM_1: u16 = 18;
 const K_NUM_9: u16 = 26;
+const K_COMMA: u16 = 43;
 
 define_class!(
     // SAFETY: NSTextView 无子类化约束；本类型不实现 Drop。
@@ -42,6 +43,18 @@ define_class!(
             // SAFETY: 共享引用即可（方法全部走 &self），避免与 Globals::runtime()
             // 重新派生的 &mut PanelRuntime 构成双重可变别名
             let runtime: &PanelRuntime = unsafe { &*(*self.ivars()) };
+            // ⌘, 打开设置：经 responder chain 命中 AppController.openSettings:
+            if key == K_COMMA && event.modifierFlags().contains(NSEventModifierFlags::Command) {
+                let mtm = MainThreadMarker::new().expect("main thread");
+                let _: bool = unsafe {
+                    NSApplication::sharedApplication(mtm).sendAction_to_from(
+                        objc2::sel!(openSettings:),
+                        None,
+                        None,
+                    )
+                };
+                return;
+            }
             // 数字键直达：顶部数字 1-9 确认对应行；越界/空列表时透传系统
             if (K_NUM_1..=K_NUM_9).contains(&key) && runtime.confirm_at((key - K_NUM_1) as usize)
             {
