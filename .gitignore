@@ -1,0 +1,14 @@
+# Build artifacts
+/target
+debug
+release
+
+# CodeGraph index (local only)
+.codegraph/
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
