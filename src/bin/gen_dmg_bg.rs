@@ -251,25 +251,10 @@ fn render(out: &str, _mtm: MainThreadMarker) {
         3.0,
         &srgb(168.0, 85.0, 247.0, 1.0),
     );
-    // 特性行：Menlo 15pt #98989F
-    draw_text(
-        "fuzzy search · ttl cleanup · auto paste",
-        LEFT_W + 80.0,
-        H - 175.0 - 20.0,
-        18.0,
-        TextKind::Mono,
-        &srgb(110.0, 110.0, 115.0, 1.0),
-    );
 
-    // —— 拖装区中带：图标 96pt 中心 (480/680, 300)，箭头 (545..618, 300) ——
-    // 名称标签不用背景图绘制：Finder 原生标签是矢量渲染（Retina 清晰），
-    // 背景图 1px=1pt 必然柔化，中等字号文字最暴露——只保留大标题/大水印。
-    let white_guide = srgb(255.0, 255.0, 255.0, 0.75);
-    // 横线 → 空心圆圈 → 箭头头部
-    stroke_line(545.0, 300.0, 585.0, 300.0, 3.0, &white_guide);
-    stroke_circle(597.0, 300.0, 10.0, 3.0, &white_guide);
-    stroke_line(611.0, 293.0, 619.0, 300.0, 3.0, &white_guide);
-    stroke_line(611.0, 307.0, 619.0, 300.0, 3.0, &white_guide);
+    // 拖装区中带：图标 96pt 中心 (480/680, 300)。箭头已移除——
+    // 其与图标的对齐依赖 Finder position 语义，任何环境差异都会错位；
+    // 拖拽引导由底部 DRAG TO APPLICATIONS 文字承担。
 
     // 底部拖装提示：y≈500（自上而下），底距 44pt 防裁切
     draw_text(
