@@ -1,0 +1,4 @@
+# 最低部署目标：macOS 10.13（High Sierra）。
+# aarch64 由 rustc 自动抬升到 11.0（ARM 机型系统下限），x86_64 真实生效于 10.13。
+[env]
+MACOSX_DEPLOYMENT_TARGET = "10.13"

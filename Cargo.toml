@@ -54,6 +54,7 @@ objc2-app-kit = { version = "0.3.2", features = [
     "NSTextInputClient",
     "NSTextView",
     "NSView",
+    "NSVisualEffectView",
     "NSWindow",
     "NSWorkspace",
     "NSTextField",
@@ -70,6 +71,7 @@ objc2-foundation = { version = "0.3.2", features = [
     "NSData",
     "NSDictionary",
     "NSObject",
+    "NSProcessInfo",
     "NSRunLoop",
     "NSString",
     "NSTimer",
@@ -77,6 +79,8 @@ objc2-foundation = { version = "0.3.2", features = [
 ] }
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+ureq = "3"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
 toml = "1.1.8"

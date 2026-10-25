@@ -111,7 +111,7 @@ pub unsafe fn build_row(
         if selected {
             cell.setWantsLayer(true);
             if let Some(layer) = cell.layer() {
-                let soft = NSColor::controlAccentColor().colorWithAlphaComponent(0.18);
+                let soft = crate::compat::accent_color().colorWithAlphaComponent(0.18);
                 layer.setBackgroundColor(Some(&soft.CGColor()));
                 layer.setCornerRadius(4.0);
             }

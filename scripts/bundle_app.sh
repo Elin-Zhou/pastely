@@ -6,12 +6,40 @@ cd "$(dirname "$0")/.."
 
 APP_NAME="Pastely"
 BUNDLE_ID="com.xelin.pastely"
-VERSION="0.1.0"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
 
+# 版本单一来源：Cargo.toml（消除脚本/包内版本漂移）
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+if [ -z "$VERSION" ]; then
+    echo "错误：无法从 Cargo.toml 读取版本号" >&2
+    exit 1
+fi
+
 source ~/.cargo/env
-cargo build --release
+
+# 构建二进制：默认 universal2（aarch64 + x86_64，lipo 合并），UNIVERSAL=0 退单架构。
+# 最低部署目标 10.13（.cargo/config.toml）；aarch64 由 rustc 自动抬升至 11.0。
+BIN="target/release/cliphub"
+if [ "${UNIVERSAL:-1}" = "1" ]; then
+    for T in aarch64-apple-darwin x86_64-apple-darwin; do
+        if ! rustup target list --installed | grep -q "^$T\$"; then
+            echo "错误：缺少 Rust target $T" >&2
+            echo "  执行 rustup target add $T，或用 UNIVERSAL=0 构建单架构" >&2
+            exit 1
+        fi
+    done
+    cargo build --release --target aarch64-apple-darwin
+    cargo build --release --target x86_64-apple-darwin
+    mkdir -p target/release-universal
+    lipo -create \
+        target/aarch64-apple-darwin/release/cliphub \
+        target/x86_64-apple-darwin/release/cliphub \
+        -output "$BIN"
+    lipo -info "$BIN"
+else
+    cargo build --release
+fi
 
 # 组装 .app 目录结构
 rm -rf "$APP"
@@ -33,7 +61,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>
-    <key>LSMinimumSystemVersion</key><string>26.0</string>
+    <key>LSMinimumSystemVersion</key><string>10.13</string>
 </dict>
 </plist>
 PLIST

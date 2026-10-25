@@ -17,6 +17,7 @@ pub mod settings;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::process::Command;
 
 use objc2::define_class;
 use objc2::msg_send;
@@ -24,24 +25,27 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertSecondButtonReturn, NSAppearance, NSAppearanceCustomization, NSAppearanceName,
-    NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSBackingStoreType, NSBezelStyle, NSBox, NSBoxType, NSButton, NSColor,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAppearance,
+    NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSBackingStoreType, NSBezelStyle, NSBox, NSBoxType, NSButton, NSColor,
     NSControlTextEditingDelegate, NSEvent, NSFont, NSGlassEffectView, NSGlassEffectViewStyle,
     NSImage, NSImageView, NSMenu, NSMenuItem, NSPanel, NSScreen, NSScrollView, NSScrollerStyle,
-    NSSearchField, NSSearchFieldDelegate, NSStatusBar, NSTableCellView, NSTextAlignment,
-    NSTextField, NSTextFieldDelegate, NSTextView, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask, NSWorkspace,
+    NSSearchField, NSSearchFieldDelegate, NSStatusBar, NSStatusItem, NSTableCellView,
+    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSView,
+    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
+    NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSData, NSNotification, NSObjectProtocol, NSString};
 
 use crate::clipboard::{self, WatcherState};
+use crate::compat;
 use crate::config::PasteMode;
 use crate::hotkey::HotkeyManager;
 use crate::model::{ClipKind, SearchableItem};
 use crate::search::fuzzy_filter;
 use crate::store::ClipStore;
+use crate::update::{ReleaseInfo, UpdateEvent, UpdateManager, UpdateState};
 
 use list_view::{build_row, ROW_HEIGHT};
 use search_field::PanelFieldEditor;
@@ -86,6 +90,14 @@ pub struct Globals {
     pub ax_prompt_shown: RefCell<bool>,
     /// 设置窗口单例（首次打开时创建并泄漏）。
     pub settings: RefCell<Option<&'static settings::SettingsWindow>>,
+    /// 自动更新管理器（状态机 + 后台任务编排，仅主线程访问）。
+    pub update: RefCell<UpdateManager>,
+    /// 状态栏 item（图标随更新状态切换）。
+    pub status_item: RefCell<Option<Retained<NSStatusItem>>>,
+    /// 「发现新版本」菜单项（仅 Available 时可见）。
+    pub update_menu_item: RefCell<Option<Retained<NSMenuItem>>>,
+    /// 「检查更新…」菜单项（检测中禁用 + 文案变化）。
+    pub check_menu_item: RefCell<Option<Retained<NSMenuItem>>>,
 }
 
 impl Globals {
@@ -357,6 +369,46 @@ define_class!(
             }
         }
 
+        /// 更新心跳（1s）：自动检测调度 + 消费后台事件。
+        #[unsafe(method(tickUpdate:))]
+        fn tick_update(&self, _timer: Option<&AnyObject>) {
+            let g = self.ivars().globals();
+            let (repo, should_check) = {
+                let cfg = g.config.borrow();
+                let um = g.update.borrow();
+                (cfg.update.repo.clone(), um.should_auto_check(&cfg.update))
+            };
+            if should_check {
+                tracing::info!("update: 自动检测开始（repo={repo}）");
+                g.update.borrow_mut().check_now(&repo, false);
+                refresh_update_menu(g);
+            }
+            let events = g.update.borrow_mut().poll();
+            for ev in events {
+                handle_update_event(g, ev);
+            }
+        }
+
+        /// 菜单「检查更新…」。
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            let g = self.ivars().globals();
+            let repo = g.config.borrow().update.repo.clone();
+            tracing::info!("update: 手动检测开始（repo={repo}）");
+            g.update.borrow_mut().check_now(&repo, true);
+            refresh_update_menu(g);
+        }
+
+        /// 菜单「发现新版本（点击安装）」。
+        #[unsafe(method(installUpdate:))]
+        fn install_update(&self, _sender: Option<&AnyObject>) {
+            let g = self.ivars().globals();
+            let info = g.update.borrow().available().cloned();
+            if let Some(info) = info {
+                show_update_confirm(g, &info);
+            }
+        }
+
         #[unsafe(method(showPanel:))]
         fn show_panel(&self, _sender: Option<&AnyObject>) {
             self.ivars().globals().show_panel();
@@ -625,21 +677,15 @@ impl PanelController {
             panel.setLevel(objc2_app_kit::NSFloatingWindowLevel);
             panel.setReleasedWhenClosed(false);
             panel.setHidesOnDeactivate(false);
-            // 玻璃面板：窗口本体透明，视觉全部由 glass effect view 承担
+            // 玻璃面板：窗口本体透明，视觉全部由背景 effect view 承担
             panel.setOpaque(false);
             panel.setBackgroundColor(Some(&NSColor::clearColor()));
             panel.setDelegate(Some(ProtocolObject::from_ref(controller)));
 
-            // 真液态玻璃底（macOS 26 NSGlassEffectView）：Regular style，
-            // 自带 cornerRadius（无需手动 layer），材质随系统深浅色自适应
-            let glass = NSGlassEffectView::initWithFrame(
-                NSGlassEffectView::alloc(mtm),
-                rect(0.0, 0.0, PANEL_WIDTH, height),
-            );
-            glass.setStyle(NSGlassEffectViewStyle::Regular);
-            glass.setCornerRadius(12.0);
+            // 面板背景：26+ 真液态玻璃 / 老系统 NSVisualEffectView 磨砂降级
+            let backdrop = make_backdrop(mtm, rect(0.0, 0.0, PANEL_WIDTH, height), 12.0);
             if let Some(cv) = panel.contentView() {
-                cv.addSubview(&glass);
+                cv.addSubview(&backdrop);
             }
 
             // 左栏：搜索框（顶部）
@@ -704,7 +750,7 @@ impl PanelController {
             );
             banner.setWantsLayer(true);
             if let Some(layer) = banner.layer() {
-                let bg = NSColor::controlAccentColor().colorWithAlphaComponent(0.15);
+                let bg = compat::accent_color().colorWithAlphaComponent(0.15);
                 layer.setBackgroundColor(Some(&bg.CGColor()));
             }
             let hint = NSTextField::labelWithString(
@@ -907,55 +953,72 @@ impl PanelController {
     }
 }
 
+/// 面板/设置窗背景工厂：macOS 26+ 真液态玻璃（NSGlassEffectView）；
+/// 老系统降级 NSVisualEffectView 磨砂 vibrancy（Popover 材质 + BehindWindow
+/// 混合 + 同款圆角；材质随系统深浅色自适应）。
+///
+/// 唯一的版本守卫点——调用方不感知系统版本（规约：版本门槛收敛在 compat）。
+///
+/// # Safety
+///
+/// 必须在主线程调用。
+pub unsafe fn make_backdrop(
+    mtm: MainThreadMarker,
+    frame: CGRect,
+    corner_radius: f64,
+) -> Retained<NSView> {
+    if compat::glass_available() {
+        let glass = NSGlassEffectView::initWithFrame(NSGlassEffectView::alloc(mtm), frame);
+        glass.setStyle(NSGlassEffectViewStyle::Regular);
+        glass.setCornerRadius(corner_radius);
+        glass.into_super()
+    } else {
+        let vibrancy = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame);
+        vibrancy.setMaterial(NSVisualEffectMaterial::Popover);
+        vibrancy.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+        vibrancy.setState(NSVisualEffectState::Active);
+        vibrancy.setWantsLayer(true);
+        if let Some(layer) = vibrancy.layer() {
+            layer.setCornerRadius(corner_radius);
+            layer.setMasksToBounds(true);
+        }
+        vibrancy.into_super()
+    }
+}
+
 /// 按 `ui.theme` 固定面板外观（`auto` 不设置：动态色自动跟随系统深浅色）。
+///
+/// 外观名运行时构造字符串（extern static `NSAppearanceNameDarkAqua` 等
+/// 是 10.14+ 的 dyld 链接符号，低版本启动即崩，不可引用）。
 ///
 /// # Safety
 ///
 /// 必须在主线程调用。
 pub unsafe fn apply_panel_theme(panel: &NSPanel, theme: &str) {
-    let name: Option<&'static NSAppearanceName> = match theme {
-        "light" => Some(unsafe { NSAppearanceNameAqua }),
-        "dark" => Some(unsafe { NSAppearanceNameDarkAqua }),
+    let name = match theme {
+        "light" => Some(NSString::from_str("NSAppearanceNameAqua")),
+        "dark" => Some(NSString::from_str("NSAppearanceNameDarkAqua")),
         _ => None,
     };
     if let Some(name) = name {
-        if let Some(appearance) = NSAppearance::appearanceNamed(name) {
+        if let Some(appearance) = NSAppearance::appearanceNamed(&name) {
             // setAppearance 来自 NSAppearanceCustomization 协议（NSPanel 已声明 conforms）
             panel.setAppearance(Some(&appearance));
         }
     }
 }
 
-/// 状态栏与菜单装配。
+/// 状态栏与菜单装配（更新相关句柄存入 globals 供后续刷新）。
 ///
 /// # Safety
 ///
 /// 必须在主线程调用。
-pub unsafe fn build_status_bar() {
+pub unsafe fn build_status_bar(globals: &'static Globals) {
     unsafe {
         let mtm = MainThreadMarker::new().expect("main thread");
         let item =
             NSStatusBar::systemStatusBar().statusItemWithLength(NS_STATUS_ITEM_VARIABLE_LENGTH);
-        // 原生 SF Symbol 模板图：自动适配菜单栏深浅色（emoji 不随主题）
-        let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-            &NSString::from_str("clipboard.on"),
-            None,
-        )
-        .or_else(|| {
-            NSImage::imageWithSystemSymbolName_accessibilityDescription(
-                &NSString::from_str("clipboard"),
-                None,
-            )
-        });
-        if let Some(img) = symbol {
-            img.setTemplate(true);
-            if let Some(button) = item.button(mtm) {
-                button.setImage(Some(&img));
-            }
-        } else if let Some(button) = item.button(mtm) {
-            // 兜底：符号不可用时退回文字
-            button.setTitle(&NSString::from_str("📋"));
-        }
+        set_status_icon(&item, false);
         let menu = NSMenu::new(mtm);
         let add = |menu: &NSMenu, title: &str, sel: objc2::runtime::Sel, key: &str| {
             let mi = NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -965,10 +1028,22 @@ pub unsafe fn build_status_bar() {
                 &NSString::from_str(key),
             );
             menu.addItem(&mi);
+            mi
         };
+        // 「发现新版本」置顶（仅 Available 时可见）
+        let update_item = add(
+            &menu,
+            "发现新版本（点击安装）",
+            objc2::sel!(installUpdate:),
+            "",
+        );
+        update_item.setHidden(true);
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
         add(&menu, "显示 Pastely", objc2::sel!(showPanel:), "");
         add(&menu, "设置…", objc2::sel!(openSettings:), ",");
         add(&menu, "暂停记录", objc2::sel!(togglePause:), "");
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let check_item = add(&menu, "检查更新…", objc2::sel!(checkForUpdates:), "");
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add(&menu, "清空历史…", objc2::sel!(clearHistory:), "");
         add(
@@ -980,8 +1055,297 @@ pub unsafe fn build_status_bar() {
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         add(&menu, "退出 Pastely", objc2::sel!(quitApp:), "q");
         item.setMenu(Some(&menu));
-        // 状态栏 item 进程生命周期持有
-        std::mem::forget(item);
+        // 状态栏句柄进程生命周期持有（图标/菜单项动态刷新用）
+        *globals.status_item.borrow_mut() = Some(item);
+        *globals.update_menu_item.borrow_mut() = Some(update_item);
+        *globals.check_menu_item.borrow_mut() = Some(check_item);
+    }
+}
+
+/// 状态栏图标：`update_available` 时切换为下载箭头，否则恢复剪切板图标。
+///
+/// SF Symbol 仅 11+ 可用（调用前必须守卫）；老系统用程序绘制模板图。
+pub fn set_status_icon(item: &NSStatusItem, update_available: bool) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(button) = item.button(mtm) else {
+        return;
+    };
+    if update_available {
+        if compat::symbol_image_available() {
+            if let Some(img) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str("arrow.down.circle"),
+                None,
+            ) {
+                img.setTemplate(true);
+                button.setImage(Some(&img));
+                return;
+            }
+        }
+        button.setImage(Some(&drawn_status_icon(IconKind::UpdateArrow)));
+    } else if compat::symbol_image_available() {
+        // 原生 SF Symbol 模板图：自动适配菜单栏深浅色（emoji 不随主题）
+        let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("clipboard.on"),
+            None,
+        )
+        .or_else(|| {
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str("clipboard"),
+                None,
+            )
+        });
+        match symbol {
+            Some(img) => {
+                img.setTemplate(true);
+                button.setImage(Some(&img));
+            }
+            None => button.setImage(Some(&drawn_status_icon(IconKind::Clipboard))),
+        }
+    } else {
+        button.setImage(Some(&drawn_status_icon(IconKind::Clipboard)));
+    }
+}
+
+/// 程序绘制图标种类（模板图，黑 + alpha，随菜单栏深浅色自适应）。
+enum IconKind {
+    Clipboard,
+    UpdateArrow,
+}
+
+/// 手绘菜单栏模板图（18×18）：SF Symbol 不可用时的全版本兜底。
+///
+/// 经典 `lockFocus` 离屏绘制（10.x 起可用，deprecated 于 10.14 但至今可用；
+/// 块式 drawingHandler 需引入 blocks 依赖，不为此引入）；模板要求纯黑 + alpha。
+#[allow(deprecated)]
+fn drawn_status_icon(kind: IconKind) -> Retained<NSImage> {
+    use objc2_app_kit::{NSBezierPath, NSColor, NSLineCapStyle};
+    let size = CGSize::new(18.0, 18.0);
+    let img = NSImage::initWithSize(NSImage::alloc(), size);
+    img.lockFocus();
+    NSColor::blackColor().set();
+    match kind {
+        IconKind::Clipboard => {
+            // 板体（圆角矩形描边）+ 顶部夹片（实心）
+            let body = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                rect(3.0, 1.5, 12.0, 15.0),
+                2.5,
+                2.5,
+            );
+            body.setLineWidth(1.5);
+            body.stroke();
+            let clip = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                rect(6.0, 14.5, 6.0, 3.0),
+                1.2,
+                1.2,
+            );
+            clip.fill();
+        }
+        IconKind::UpdateArrow => {
+            // 圆圈描边 + 圆内下载箭头（圆角线帽）
+            let circle = NSBezierPath::bezierPathWithOvalInRect(rect(1.5, 1.5, 15.0, 15.0));
+            circle.setLineWidth(1.5);
+            circle.stroke();
+            let arrow = NSBezierPath::bezierPath();
+            arrow.setLineWidth(1.5);
+            arrow.setLineCapStyle(NSLineCapStyle::Round);
+            arrow.moveToPoint(CGPoint::new(9.0, 12.5));
+            arrow.lineToPoint(CGPoint::new(9.0, 5.5));
+            arrow.moveToPoint(CGPoint::new(5.8, 8.7));
+            arrow.lineToPoint(CGPoint::new(9.0, 5.5));
+            arrow.lineToPoint(CGPoint::new(12.2, 8.7));
+            arrow.stroke();
+        }
+    }
+    img.unlockFocus();
+    img.setTemplate(true);
+    img
+}
+
+/// 刷新更新相关菜单项与状态栏图标（状态机变化后调用；幂等）。
+fn refresh_update_menu(g: &Globals) {
+    let (state_available, checking, downloading) = {
+        let um = g.update.borrow();
+        let (checking, downloading) = match &um.state {
+            UpdateState::Checking => (true, false),
+            UpdateState::Downloading(_) => (false, true),
+            _ => (false, false),
+        };
+        (um.available().is_some(), checking, downloading)
+    };
+    let check_title = if checking {
+        "正在检查更新…"
+    } else if downloading {
+        "正在下载更新…"
+    } else {
+        "检查更新…"
+    };
+    if let Some(item) = g.status_item.borrow().as_ref() {
+        set_status_icon(item, state_available);
+    }
+    if let Some(mi) = g.update_menu_item.borrow().as_ref() {
+        let title = match g.update.borrow().available() {
+            Some(info) => format!("发现新版本 {}（点击安装）", info.version),
+            None => "发现新版本（点击安装）".to_string(),
+        };
+        mi.setTitle(&NSString::from_str(&title));
+        mi.setHidden(!state_available);
+    }
+    if let Some(mi) = g.check_menu_item.borrow().as_ref() {
+        mi.setTitle(&NSString::from_str(check_title));
+        mi.setEnabled(!checking && !downloading);
+    }
+}
+
+/// 处理后台更新事件（主线程，`tickUpdate:` 内调用）。
+fn handle_update_event(g: &Globals, ev: UpdateEvent) {
+    match ev {
+        UpdateEvent::Checked { manual, result } => match result {
+            Ok(Some(info)) => {
+                tracing::info!("update: 发现新版本 {}（{}）", info.version, info.dmg_url);
+                refresh_update_menu(g);
+                if manual {
+                    show_update_confirm(g, &info);
+                }
+            }
+            Ok(None) => {
+                tracing::info!("update: 检测完成，已是最新版本");
+                refresh_update_menu(g);
+                if manual {
+                    show_info_alert(
+                        "检查更新",
+                        &format!(
+                            "当前已是最新版本（Pastely {}）。",
+                            crate::update::CURRENT_VERSION
+                        ),
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("update: 检测失败: {e}");
+                refresh_update_menu(g);
+                if manual {
+                    show_info_alert("检查更新失败", &e);
+                }
+            }
+        },
+        UpdateEvent::Installed { result } => match result {
+            Ok(new_bundle) => {
+                tracing::info!("update: 安装完成，重启到 {}", new_bundle.display());
+                refresh_update_menu(g);
+                restart_into_bundle(&new_bundle);
+            }
+            Err(e) => {
+                tracing::error!("update: 自动安装失败: {e}");
+                refresh_update_menu(g);
+                show_install_failed(g, &e);
+            }
+        },
+    }
+}
+
+/// 更新确认弹窗（默认按钮 = 立即更新，回车即装；「稍后」仅关闭）。
+fn show_update_confirm(g: &Globals, info: &ReleaseInfo) {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    unsafe {
+        let alert: Retained<NSAlert> = msg_send![NSAlert::alloc(mtm), init];
+        alert.setMessageText(&NSString::from_str(&format!(
+            "发现新版本 {}（当前 {}）",
+            info.version,
+            crate::update::CURRENT_VERSION
+        )));
+        let notes = if info.notes.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}", info.notes)
+        };
+        alert.setInformativeText(&NSString::from_str(&format!(
+            "确认后自动下载并安装，完成后应用将重启。{notes}"
+        )));
+        alert.addButtonWithTitle(&NSString::from_str("立即更新"));
+        alert.addButtonWithTitle(&NSString::from_str("稍后"));
+        if alert.runModal() == NSAlertFirstButtonReturn {
+            g.update.borrow_mut().confirm_install();
+            refresh_update_menu(g);
+        }
+    }
+}
+
+/// 安装失败弹窗；已下载的 DMG 存在时提供「打开 DMG」手动兜底。
+fn show_install_failed(g: &Globals, error: &str) {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    let downloaded = latest_downloaded_dmg();
+    let detail = match &downloaded {
+        Some(path) => format!(
+            "{error}\n\n已下载的安装包保留在：{}\n可打开后手动拖入 Applications 完成更新。",
+            path.display()
+        ),
+        None => format!("{error}\n\n可稍后重试，或到 Releases 页面手动下载。"),
+    };
+    unsafe {
+        let alert: Retained<NSAlert> = msg_send![NSAlert::alloc(mtm), init];
+        alert.setMessageText(&NSString::from_str("自动更新失败"));
+        alert.setInformativeText(&NSString::from_str(&detail));
+        alert.addButtonWithTitle(&NSString::from_str("确定"));
+        if downloaded.is_some() {
+            alert.addButtonWithTitle(&NSString::from_str("打开 DMG"));
+        }
+        let choice = alert.runModal();
+        if choice == NSAlertSecondButtonReturn {
+            if let Some(path) = downloaded {
+                let _ = Command::new("open").arg(&path).status();
+            }
+        }
+        let _ = g;
+    }
+}
+
+/// 探测最近的已下载更新 DMG（失败兜底用；无则 None）。
+fn latest_downloaded_dmg() -> Option<PathBuf> {
+    let dir = std::env::temp_dir();
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("pastely-update-") && name.ends_with(".dmg") {
+            if let Ok(meta) = entry.metadata() {
+                let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+                    best = Some((modified, entry.path()));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// `open -n` 启动新 bundle 后终止当前进程（安装成功的收尾）。
+fn restart_into_bundle(new_bundle: &PathBuf) {
+    match Command::new("open").arg("-n").arg(new_bundle).status() {
+        Ok(status) if status.success() => {
+            tracing::info!("update: 新版本已启动，退出旧进程");
+            let mtm = MainThreadMarker::new().expect("main thread");
+            let app = NSApplication::sharedApplication(mtm);
+            app.terminate(None);
+        }
+        Ok(status) => {
+            tracing::error!("update: open -n 退出异常（{status}），旧进程保持运行");
+        }
+        Err(e) => {
+            tracing::error!("update: 启动新版本失败（{e}），旧进程保持运行");
+        }
+    }
+}
+
+/// 信息弹窗（单按钮）。
+fn show_info_alert(title: &str, msg: &str) {
+    let mtm = MainThreadMarker::new().expect("main thread");
+    unsafe {
+        let alert: Retained<NSAlert> = msg_send![NSAlert::alloc(mtm), init];
+        alert.setMessageText(&NSString::from_str(title));
+        alert.setInformativeText(&NSString::from_str(msg));
+        alert.runModal();
     }
 }
 

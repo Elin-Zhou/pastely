@@ -15,7 +15,7 @@ pub struct GeneralConfig {
     pub first_run_done: bool,
 }
 
-/// 顶层配置（`[general]` / `[hotkey]` / `[storage]` / `[paste]` / `[ui]` 五节）。
+/// 顶层配置（`[general]` / `[hotkey]` / `[storage]` / `[paste]` / `[ui]` / `[update]` 六节）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -24,6 +24,7 @@ pub struct Config {
     pub storage: StorageConfig,
     pub paste: PasteConfig,
     pub ui: UiConfig,
+    pub update: UpdateConfig,
 }
 
 /// `[hotkey]` 节。
@@ -63,6 +64,18 @@ pub struct UiConfig {
     pub max_list_rows: usize,
     /// 主题：`"auto"` / `"light"` / `"dark"`（装配层解释）。
     pub theme: String,
+}
+
+/// `[update]` 节：GitHub Releases 自动更新。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// 自动检测开关（手动菜单项不受影响）。
+    pub auto_check: bool,
+    /// 自动检测间隔（分钟）；0 = 关闭自动检测。
+    pub interval_minutes: u32,
+    /// 检测源仓库（`owner/name`）。
+    pub repo: String,
 }
 
 /// 粘贴模式：自动写回剪贴板并粘贴，或仅复制。
@@ -105,6 +118,16 @@ impl Default for UiConfig {
         Self {
             max_list_rows: 10,
             theme: "auto".to_string(),
+        }
+    }
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            interval_minutes: 30,
+            repo: "Elin-Zhou/pastely".to_string(),
         }
     }
 }
@@ -169,6 +192,9 @@ mod tests {
         assert_eq!(c.paste.mode, PasteMode::Auto);
         assert_eq!(c.ui.max_list_rows, 10);
         assert_eq!(c.ui.theme, "auto");
+        assert!(c.update.auto_check);
+        assert_eq!(c.update.interval_minutes, 30);
+        assert_eq!(c.update.repo, "Elin-Zhou/pastely");
     }
 
     #[test]
@@ -184,6 +210,9 @@ mod tests {
         c.paste.mode = PasteMode::CopyOnly;
         c.ui.max_list_rows = 6;
         c.ui.theme = "dark".to_string();
+        c.update.auto_check = false;
+        c.update.interval_minutes = 120;
+        c.update.repo = "example/pastely".to_string();
         c.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, c);
@@ -207,6 +236,10 @@ mod tests {
         assert!(raw.contains("mode = \"auto\""));
         assert!(raw.contains("max_list_rows = 10"));
         assert!(raw.contains("theme = \"auto\""));
+        assert!(raw.contains("[update]"), "raw:\n{raw}");
+        assert!(raw.contains("auto_check = true"), "raw:\n{raw}");
+        assert!(raw.contains("interval_minutes = 30"), "raw:\n{raw}");
+        assert!(raw.contains("repo = \"Elin-Zhou/pastely\""), "raw:\n{raw}");
         cleanup(&path);
     }
 
@@ -293,6 +326,19 @@ mod tests {
         assert_eq!(c.hotkey.main, "Ctrl+Cmd+V");
         assert_eq!(c.storage.max_items, 1000);
         assert_eq!(c.paste.mode, PasteMode::Auto);
+        assert!(c.update.auto_check);
+        assert_eq!(c.update.interval_minutes, 30);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn load_legacy_file_without_update_section_fills_defaults() {
+        // 旧版本配置无 [update] 节：serde default 自动补齐，行为不变
+        let path = tmp_config("legacy-no-update");
+        cleanup(&path);
+        std::fs::write(&path, "[general]\nfirst_run_done = true\n").unwrap();
+        let c = Config::load(&path).unwrap();
+        assert_eq!(c.update, crate::config::UpdateConfig::default());
         cleanup(&path);
     }
 }

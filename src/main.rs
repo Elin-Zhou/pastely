@@ -128,6 +128,10 @@ fn main() -> anyhow::Result<()> {
             ax_hint_shown: RefCell::new(false),
             ax_prompt_shown: RefCell::new(false),
             settings: RefCell::new(None),
+            update: RefCell::new(cliphub::update::UpdateManager::new()),
+            status_item: RefCell::new(None),
+            update_menu_item: RefCell::new(None),
+            check_menu_item: RefCell::new(None),
         }));
 
         // 运行时选择状态（泄漏，field editor 裸指针指向它）
@@ -166,7 +170,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
 
-        // 定时器：watcher 300ms / hotkey 100ms / ttl 3600s
+        // 定时器：watcher 300ms / hotkey 100ms / ttl 3600s / update 1s
         let timer = |interval: f64, sel: objc2::runtime::Sel| {
             objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
                 interval,
@@ -179,9 +183,10 @@ fn main() -> anyhow::Result<()> {
         timer(0.3, objc2::sel!(tickWatch:));
         timer(0.1, objc2::sel!(tickHotkey:));
         timer(3600.0, objc2::sel!(tickTtl:));
+        timer(1.0, objc2::sel!(tickUpdate:));
 
-        // 状态栏
-        cliphub::panel::build_status_bar();
+        // 状态栏（更新菜单项/图标句柄存入 globals）
+        cliphub::panel::build_status_bar(globals);
 
         // 首次启动：一次性询问开机自启动（run 前同步弹，选完再进事件循环）
         if !config.general.first_run_done {

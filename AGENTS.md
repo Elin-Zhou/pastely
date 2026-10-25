@@ -29,3 +29,5 @@ ClipHub 是一个 macOS 桌面剪切板历史管理工具（Rust）：后台监�
 | 日期 | 事件 |
 |------|------|
 | 2026-10-25 | 项目初始化（SDD 工作流） |
+| 2026-10-25 | MVP v0.1.0 发布（AppKit 面板/设置/DMG）；应用更名 Pastely |
+| 2026-10-25 | 新增自动更新（GitHub Releases + 状态栏提示 + 自动安装重启）与 macOS 10.13+ 兼容（版本守卫 + NSVisualEffectView 降级 + universal2 构建）；见 src/update/ src/compat.rs src/autostart_legacy.rs |

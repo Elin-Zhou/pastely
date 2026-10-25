@@ -10,8 +10,8 @@ use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSBackingStoreType, NSBeep, NSBezelStyle, NSButton, NSButtonType,
-    NSColor, NSEvent, NSEventModifierFlags, NSFont, NSGlassEffectView, NSGlassEffectViewStyle,
-    NSPopUpButton, NSTextField, NSView, NSWindow, NSWindowStyleMask,
+    NSColor, NSEvent, NSEventModifierFlags, NSFont, NSPopUpButton, NSTextField, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::NSString;
@@ -372,10 +372,7 @@ pub fn save(globals: &'static super::Globals) {
             );
             return;
         }
-        tracing::info!(
-            "开机自启动已{}（SMAppService）",
-            if launch_now { "开启" } else { "关闭" }
-        );
+        tracing::info!("开机自启动已{}", if launch_now { "开启" } else { "关闭" });
     }
 
     let mut cfg = globals.config.borrow().clone();
@@ -474,15 +471,11 @@ unsafe fn build(
         window.setOpaque(false);
         window.setBackgroundColor(Some(&NSColor::clearColor()));
 
-        // 玻璃底（与主面板同款）
-        let glass = NSGlassEffectView::initWithFrame(
-            NSGlassEffectView::alloc(mtm),
-            rect(0.0, 0.0, SETTINGS_WIDTH, SETTINGS_HEIGHT),
-        );
-        glass.setStyle(NSGlassEffectViewStyle::Regular);
-        glass.setCornerRadius(12.0);
+        // 背景底（与主面板同款：26+ 玻璃 / 老系统磨砂）
+        let backdrop =
+            super::make_backdrop(mtm, rect(0.0, 0.0, SETTINGS_WIDTH, SETTINGS_HEIGHT), 12.0);
         if let Some(cv) = window.contentView() {
-            cv.addSubview(&glass);
+            cv.addSubview(&backdrop);
         }
 
         // 表单容器：整体位于红绿灯区域之下（TOP_INSET），行几何全部相对容器
