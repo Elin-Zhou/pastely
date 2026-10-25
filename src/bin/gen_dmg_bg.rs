@@ -1,8 +1,9 @@
-//! DMG 安装器背景图渲染（AppKit 离屏位图，1280×800）。
+//! DMG 安装器背景图渲染（AppKit 离屏位图，逻辑 880×560 @2x = 1760×1120 PNG）。
 //!
-//! 左区：紫罗兰垂直渐变 + 白色剪贴板水印 + 右缘 2pt 分隔线；
-//! 右区：#1A1A1E 底 + 标题 / 强调线 / 特性行 + 底部拖装提示。
+//! 左区（37.5% 宽）：紫罗兰垂直渐变 + 白色剪贴板水印 + 右缘 2pt 分隔线；
+//! 右区：#1A1A1E 底 + 标题 / 强调线 / 特性行 + 拖装指引（箭头 + 图标名标签）+ 底部提示。
 //!
+//! 逻辑坐标系 880×560（底左原点），渲染时统一乘 [`SCALE`]（2x Retina 清晰度）。
 //! 输出 PNG：`cargo run --bin gen_dmg_bg -- <输出路径>`（默认 dmg_bg.png）。
 //! 无 NSApp 也可运行（离屏位图上下文，主线程 mtm）。
 
@@ -16,33 +17,65 @@ use objc2_app_kit::{
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSArray, NSAttributedStringKey, NSCopying, NSDictionary, NSString};
 
-const W: f64 = 1280.0;
-const H: f64 = 800.0;
+/// 逻辑宽（pt）。
+const W: f64 = 880.0;
+/// 逻辑高（pt）。
+const H: f64 = 560.0;
+/// 渲染倍率：2x Retina，Finder 缩到逻辑窗口显示。
+const SCALE: f64 = 2.0;
+/// 左区宽（逻辑，37.5%）。
+const LEFT_W: f64 = 330.0;
+
+fn s(v: f64) -> f64 {
+    v * SCALE
+}
 
 fn srgb(r: f64, g: f64, b: f64, a: f64) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r / 255.0, g / 255.0, b / 255.0, a)
 }
 
-fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
-    CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+/// 逻辑坐标 → 渲染位图矩形（统一 SCALE 入口）。
+fn srect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+    CGRect::new(CGPoint::new(s(x), s(y)), CGSize::new(s(w), s(h)))
 }
 
-fn fill_rect(r: CGRect, color: &NSColor) {
+fn fill_rect(x: f64, y: f64, w: f64, h: f64, color: &NSColor) {
     color.setFill();
-    NSBezierPath::bezierPathWithRect(r).fill();
+    NSBezierPath::bezierPathWithRect(srect(x, y, w, h)).fill();
 }
 
-fn stroke_rounded(r: CGRect, radius: f64, width: f64, color: &NSColor) {
-    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, radius, radius);
-    path.setLineWidth(width);
+fn stroke_rounded(x: f64, y: f64, w: f64, h: f64, radius: f64, width: f64, color: &NSColor) {
+    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+        srect(x, y, w, h),
+        s(radius),
+        s(radius),
+    );
+    path.setLineWidth(s(width));
     color.setStroke();
     path.stroke();
 }
 
-fn fill_rounded(r: CGRect, radius: f64, color: &NSColor) {
-    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(r, radius, radius);
+fn fill_rounded(x: f64, y: f64, w: f64, h: f64, radius: f64, color: &NSColor) {
+    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+        srect(x, y, w, h),
+        s(radius),
+        s(radius),
+    );
     color.setFill();
     path.fill();
+}
+
+fn stroke_line(x0: f64, y0: f64, x1: f64, y1: f64, width: f64, color: &NSColor) {
+    let path = NSBezierPath::bezierPath();
+    path.setLineWidth(s(width));
+    path.moveToPoint(CGPoint::new(s(x0), s(y0)));
+    path.lineToPoint(CGPoint::new(s(x1), s(y1)));
+    color.setStroke();
+    path.stroke();
+}
+
+fn stroke_circle(cx: f64, cy: f64, r: f64, width: f64, color: &NSColor) {
+    stroke_rounded(cx - r, cy - r, 2.0 * r, 2.0 * r, r, width, color);
 }
 
 /// 白色剪贴板水印（板身描边 + 顶部夹子 + 三条内容线），居中于 (cx, cy)。
@@ -58,19 +91,17 @@ fn draw_clipboard(cx: f64, cy: f64, board_h: f64) {
     let radius = board_h * 0.10;
 
     // 发光带（描边外柔和白圈）
-    stroke_rounded(
-        rect(x0, y0, board_w, board_h),
-        radius,
-        12.0 + 26.0,
-        &white_glow,
-    );
+    stroke_rounded(x0, y0, board_w, board_h, radius, 12.0 + 26.0, &white_glow);
     // 板身描边
-    stroke_rounded(rect(x0, y0, board_w, board_h), radius, 12.0, &white_solid);
+    stroke_rounded(x0, y0, board_w, board_h, radius, 12.0, &white_solid);
     // 顶部夹子（骑在板身上边缘中央）
     let tab_w = board_w * 0.40;
     let tab_h = 52.0;
     fill_rounded(
-        rect(cx - tab_w / 2.0, y1 - tab_h / 2.0, tab_w, tab_h),
+        cx - tab_w / 2.0,
+        y1 - tab_h / 2.0,
+        tab_w,
+        tab_h,
         18.0,
         &white_solid,
     );
@@ -80,12 +111,7 @@ fn draw_clipboard(cx: f64, cy: f64, board_h: f64) {
     let pad = 52.0;
     for k in 1..=3 {
         let ly = y0 + pad + (board_h - 2.0 * pad) * k as f64 / 4.0;
-        let path = NSBezierPath::bezierPath();
-        path.setLineWidth(9.0);
-        path.moveToPoint(CGPoint::new(line_x, ly));
-        path.lineToPoint(CGPoint::new(line_x + line_w, ly));
-        white_line.setStroke();
-        path.stroke();
+        stroke_line(line_x, ly, line_x + line_w, ly, 9.0, &white_line);
     }
 }
 
@@ -121,18 +147,42 @@ fn text_attrs(
     unsafe { NSDictionary::dictionaryWithObjects_forKeys(&objects, &keys) }
 }
 
-/// 在当前图形上下文绘制一行文本（AppKit 底左坐标）。
-fn draw_text(text: &str, x: f64, y: f64, font: &NSFont, color: &NSColor) {
-    let attrs = text_attrs(font, color);
-    let s = NSString::from_str(text);
-    // SAFETY: 属性字典类型正确（NSFont/NSColor 对应键）
-    unsafe { NSStringDrawing::drawAtPoint_withAttributes(&*s, CGPoint::new(x, y), Some(&attrs)) };
+#[derive(Clone, Copy, PartialEq)]
+enum TextKind {
+    /// 系统加粗（标题）。
+    Bold,
+    /// Menlo 等宽（特性行 / 拖装提示）。
+    Mono,
+    /// 系统 semibold（图标名标签）。
+    Semibold,
 }
 
-/// Menlo（系统缺失时退回等宽系统字体）。
-fn menlo(size: f64) -> Retained<NSFont> {
-    NSFont::fontWithName_size(&NSString::from_str("Menlo-Regular"), size)
-        .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, 0.0))
+fn font_for(size: f64, kind: TextKind) -> Retained<NSFont> {
+    match kind {
+        TextKind::Bold => NSFont::boldSystemFontOfSize(s(size)),
+        TextKind::Mono => NSFont::fontWithName_size(&NSString::from_str("Menlo-Regular"), s(size))
+            .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(s(size), 0.0)),
+        TextKind::Semibold => NSFont::systemFontOfSize_weight(s(size), 0.3),
+    }
+}
+
+/// 在当前图形上下文绘制一行文本（逻辑坐标，底左原点）。
+fn draw_text(text: &str, x: f64, y: f64, size: f64, kind: TextKind, color: &NSColor) {
+    let attrs = text_attrs(&font_for(size, kind), color);
+    let ns = NSString::from_str(text);
+    // SAFETY: 属性字典类型正确（NSFont/NSColor 对应键）
+    unsafe {
+        NSStringDrawing::drawAtPoint_withAttributes(&*ns, CGPoint::new(s(x), s(y)), Some(&attrs))
+    };
+}
+
+/// 水平居中绘制（逻辑中心 cx）。
+fn draw_text_centered(text: &str, cx: f64, y: f64, size: f64, kind: TextKind, color: &NSColor) {
+    let attrs = text_attrs(&font_for(size, kind), color);
+    let ns = NSString::from_str(text);
+    // SAFETY: 属性字典类型正确（NSFont/NSColor 对应键）
+    let w = unsafe { NSStringDrawing::sizeWithAttributes(&*ns, Some(&attrs)) }.width;
+    draw_text(text, cx - w / 2.0 / SCALE, y, size, kind, color);
 }
 
 fn main() {
@@ -147,13 +197,13 @@ fn main() {
 }
 
 fn render(out: &str, _mtm: MainThreadMarker) {
-    // 离屏 RGBA 位图（bytesPerRow/bitsPerPixel 交由系统决定）
+    // 离屏 RGBA 位图（逻辑 × SCALE，bytesPerRow/bitsPerPixel 交由系统决定）
     let rep = unsafe {
         NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(),
             std::ptr::null_mut(),
-            1280,
-            800,
+            s(W) as isize,
+            s(H) as isize,
             8,
             4,
             true,
@@ -174,43 +224,74 @@ fn render(out: &str, _mtm: MainThreadMarker) {
         &srgb(168.0, 85.0, 247.0, 1.0),
     )
     .expect("创建渐变失败");
-    gradient.drawInRect_angle(rect(0.0, 0.0, 480.0, H), -90.0);
+    gradient.drawInRect_angle(srect(0.0, 0.0, LEFT_W, H), -90.0);
     // 白色剪贴板水印
-    draw_clipboard(240.0, 400.0, 440.0);
+    draw_clipboard(LEFT_W / 2.0, H / 2.0, 300.0);
     // 右缘分隔线（白 alpha 0.25）
-    fill_rect(rect(478.0, 0.0, 2.0, H), &srgb(255.0, 255.0, 255.0, 0.25));
+    fill_rect(LEFT_W - 2.0, 0.0, 2.0, H, &srgb(255.0, 255.0, 255.0, 0.25));
 
     // —— 右区：#1A1A1E 底 ——
-    fill_rect(rect(480.0, 0.0, W - 480.0, H), &srgb(26.0, 26.0, 30.0, 1.0));
+    fill_rect(LEFT_W, 0.0, W - LEFT_W, H, &srgb(26.0, 26.0, 30.0, 1.0));
 
-    // 标题 Pastely：顶部 y=80（自上而下）→ 底左坐标 800-80-68≈652
-    let title_font = NSFont::boldSystemFontOfSize(56.0);
+    // 标题：顶部 y=64（自上而下）→ 底左 y = H-64-68
     draw_text(
         "Pastely",
-        560.0,
-        H - 80.0 - 68.0,
-        &title_font,
+        LEFT_W + 80.0,
+        H - 64.0 - 68.0,
+        56.0,
+        TextKind::Bold,
         &srgb(255.0, 255.0, 255.0, 1.0),
     );
     // 强调线：标题下 24pt，220×3，紫
     fill_rect(
-        rect(560.0, H - 174.0 - 3.0, 220.0, 3.0),
+        LEFT_W + 80.0,
+        H - 156.0 - 3.0,
+        220.0,
+        3.0,
         &srgb(168.0, 85.0, 247.0, 1.0),
     );
     // 特性行：Menlo 15pt #98989F
     draw_text(
         "fuzzy search · ttl cleanup · auto paste",
-        560.0,
-        H - 193.0 - 18.0,
-        &menlo(15.0),
+        LEFT_W + 80.0,
+        H - 175.0 - 18.0,
+        15.0,
+        TextKind::Mono,
         &srgb(152.0, 152.0, 159.0, 1.0),
     );
-    // 底部拖装提示：Menlo 13pt #7C7C85
+
+    // —— 拖装区中带：图标 96pt 中心 (505/695, 305)，箭头 (565..635, 305) ——
+    let white_guide = srgb(255.0, 255.0, 255.0, 0.75);
+    // 横线 → 空心圆圈 → 箭头头部
+    stroke_line(565.0, 305.0, 602.0, 305.0, 3.0, &white_guide);
+    stroke_circle(614.0, 305.0, 10.0, 3.0, &white_guide);
+    stroke_line(628.0, 298.0, 636.0, 305.0, 3.0, &white_guide);
+    stroke_line(628.0, 312.0, 636.0, 305.0, 3.0, &white_guide);
+    // 名称标签（图标下方，水平居中各自图标中心；顶 375 自上而下）
+    draw_text_centered(
+        "Pastely",
+        505.0,
+        H - 400.0,
+        17.0,
+        TextKind::Semibold,
+        &srgb(255.0, 255.0, 255.0, 0.92),
+    );
+    draw_text_centered(
+        "Applications",
+        695.0,
+        H - 400.0,
+        17.0,
+        TextKind::Semibold,
+        &srgb(255.0, 255.0, 255.0, 0.92),
+    );
+
+    // 底部拖装提示：y≈515（自上而下）；缩短字串避免窄窗口溢出
     draw_text(
-        "D R A G   O N T O   A P P L I C A T I O N S   T O   I N S T A L L",
-        560.0,
-        H - 740.0 - 16.0,
-        &menlo(13.0),
+        "D R A G   T O   A P P L I C A T I O N S",
+        LEFT_W + 80.0,
+        H - 515.0 - 16.0,
+        13.0,
+        TextKind::Mono,
         &srgb(124.0, 124.0, 133.0, 1.0),
     );
 

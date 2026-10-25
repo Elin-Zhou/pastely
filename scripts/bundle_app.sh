@@ -102,13 +102,14 @@ tell application "Finder"
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    set bounds of container window to {100, 100, 1380, 900}
+    set bounds of container window to {100, 100, 980, 660}
     set viewOptions to icon view options of container window
     set arrangement of viewOptions to not arranged
-    set icon size of viewOptions to 128
+    set icon size of viewOptions to 96
+    set shows item info of viewOptions to false
     set background picture of viewOptions to file ".background:dmg_bg.png"
-    set position of item "$APP_NAME.app" of container window to {700, 330}
-    set position of item "Applications" of container window to {1020, 330}
+    set position of item "$APP_NAME.app" of container window to {457, 257}
+    set position of item "Applications" of container window to {647, 257}
     close
     open
     update without registering applications
