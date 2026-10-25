@@ -7,11 +7,60 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1.0.104"
+core-graphics = "0.25.0"
+core-graphics-types = "0.2.0"
 dirs = "7.0.0"
 fuzzy-matcher = "0.3.7"
 global-hotkey = "0.9.0"
+objc2 = "0.6.2"
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSAlert",
+    "NSApplication",
+    "NSAttributedString",
+    "NSBitmapImageRep",
+    "NSCell",
+    "NSColor",
+    "NSControl",
+    "NSEvent",
+    "NSFont",
+    "NSImage",
+    "NSImageView",
+    "NSMenu",
+    "NSMenuItem",
+    "NSPanel",
+    "NSPasteboard",
+    "NSRunningApplication",
+    "NSScreen",
+    "NSScrollView",
+    "NSSearchField",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSTableCellView",
+    "NSTableColumn",
+    "NSTableView",
+    "NSTextView",
+    "NSView",
+    "NSWindow",
+    "NSWorkspace",
+    "NSTextField",
+] }
+objc2-core-foundation = "0.3.2"
+objc2-foundation = { version = "0.3.2", features = [
+    "NSArray",
+    "NSAttributedString",
+    "NSData",
+    "NSDictionary",
+    "NSObject",
+    "NSRunLoop",
+    "NSString",
+    "NSTimer",
+    "NSValue",
+] }
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.1"
 thiserror = "2.0.21"
 toml = "1.1.8"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
