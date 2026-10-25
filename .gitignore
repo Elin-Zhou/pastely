@@ -12,3 +12,6 @@ release
 # IDE
 .idea/
 .vscode/
+
+# SDD scratch
+.superpowers/
