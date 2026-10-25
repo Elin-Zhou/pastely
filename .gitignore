@@ -15,3 +15,6 @@ release
 
 # SDD scratch
 .superpowers/
+
+# Bundling output
+dist/
