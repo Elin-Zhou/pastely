@@ -55,8 +55,11 @@ define_class!(
                 };
                 return;
             }
-            // 数字键直达：顶部数字 1-9 确认对应行；越界/空列表时透传系统
-            if (K_NUM_1..=K_NUM_9).contains(&key) && runtime.confirm_at((key - K_NUM_1) as usize)
+            // 数字键直达：顶部数字 1-9 确认对应行——仅当搜索词为空
+            // （有查询词时用户是在"搜索"数字，透传给输入框）；越界/空列表也透传
+            if (K_NUM_1..=K_NUM_9).contains(&key)
+                && runtime.query.is_empty()
+                && runtime.confirm_at((key - K_NUM_1) as usize)
             {
                 return;
             }

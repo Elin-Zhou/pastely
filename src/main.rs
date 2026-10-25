@@ -101,18 +101,20 @@ fn main() -> anyhow::Result<()> {
             g: globals,
             filtered: Vec::new(),
             selected: 0,
+            query: String::new(),
         }));
         *globals.runtime.borrow_mut() = Some(runtime as *mut PanelRuntime);
 
         // AppController（ivar 指向 globals）
         let controller = AppController::create(globals);
 
-        // 面板（field editor 在此挂入 controller ivars）
+        // 面板（field editor 在此挂入 controller ivars；列表容器持 globals 指针）
         let panel: &'static PanelController = Box::leak(Box::new(PanelController::new(
             mtm,
             config.ui.max_list_rows,
             runtime as *mut PanelRuntime,
             &controller,
+            globals,
         )));
         *globals.panel.borrow_mut() = Some(panel);
 

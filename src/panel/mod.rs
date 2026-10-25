@@ -27,8 +27,8 @@ use objc2_app_kit::{
     NSAlert, NSAlertSecondButtonReturn, NSAppearance, NSAppearanceCustomization, NSAppearanceName,
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
     NSApplicationDelegate, NSBackingStoreType, NSBezelStyle, NSBox, NSBoxType, NSButton, NSColor,
-    NSControlTextEditingDelegate, NSFont, NSGlassEffectView, NSGlassEffectViewStyle, NSImage,
-    NSImageView, NSMenu, NSMenuItem, NSPanel, NSScreen, NSScrollView, NSScrollerStyle,
+    NSControlTextEditingDelegate, NSEvent, NSFont, NSGlassEffectView, NSGlassEffectViewStyle,
+    NSImage, NSImageView, NSMenu, NSMenuItem, NSPanel, NSScreen, NSScrollView, NSScrollerStyle,
     NSSearchField, NSSearchFieldDelegate, NSStatusBar, NSTableCellView, NSTextAlignment,
     NSTextField, NSTextFieldDelegate, NSTextView, NSView, NSWindow, NSWindowDelegate,
     NSWindowStyleMask, NSWorkspace,
@@ -103,6 +103,7 @@ impl Globals {
         let Some(rt) = self.runtime() else {
             return;
         };
+        rt.query = query.to_string();
         let items = {
             let store = self.store.lock().expect("store poisoned");
             store.all_searchable().unwrap_or_default()
@@ -129,7 +130,18 @@ impl Globals {
         }
         let len = rt.filtered.len() as i32;
         let next = ((rt.selected as i32) + delta).rem_euclid(len);
-        rt.selected = next as usize;
+        self.move_to(next as usize);
+    }
+
+    /// 鼠标点击选择行（仅改选中并刷新，不 confirm、不关面板）。
+    pub fn move_to(&self, index: usize) {
+        let Some(rt) = self.runtime() else {
+            return;
+        };
+        if index >= rt.filtered.len() {
+            return;
+        }
+        rt.selected = index;
         if let Some(p) = self.panel() {
             p.update_list(&rt.filtered, rt.selected, &|id| {
                 let store = self.store.lock().expect("store poisoned");
@@ -197,7 +209,14 @@ impl Globals {
                     Err(e) => tracing::error!("paste-back: 投递失败: {e:#}"),
                 }
             } else {
-                tracing::warn!("辅助功能未授权，本次降级为仅复制");
+                // 针对性提示：ad-hoc 签名每次重新打包 cdhash 变化，
+                // TCC 按 designated requirement 匹配 → 旧授权对新 build 失效，
+                // 系统设置里看似已开启但 AXIsProcessTrusted() 返回 false
+                tracing::warn!(
+                    "AX 授权检查未通过（is_ax_trusted=false），本次降级为仅复制。\
+                     若系统设置中已开启：ad-hoc 签名在重新打包后需删除旧条目重新授权\
+                     （系统设置中选中 GlassClip 按 '-' 删除，再触发一次粘贴以弹出授权框）"
+                );
                 let mut hinted = self.ax_hint_shown.borrow_mut();
                 if !*hinted {
                     *hinted = true;
@@ -245,6 +264,8 @@ pub struct PanelRuntime {
     pub g: *const Globals,
     pub filtered: Vec<(SearchableItem, Vec<usize>)>,
     pub selected: usize,
+    /// 当前搜索词（非空时数字键 1-9 透传给输入，不做行直达）。
+    pub query: String,
 }
 
 impl PanelRuntime {
@@ -498,13 +519,64 @@ pub struct PanelController {
     pub search_field: Retained<NSSearchField>,
     /// 列表滚动容器（documentView 为 [`Self::list_container`]）。
     list_scroll: Retained<NSScrollView>,
-    pub list_container: Retained<NSView>,
+    pub list_container: Retained<ListContainerView>,
     /// 右栏预览区（分栏布局）。
     pub preview_container: Retained<NSView>,
-    /// AX 未授权横幅（顶部覆盖，默认隐藏）。
+    /// AX 未授权横幅（底部覆盖，默认隐藏）。
     ax_banner: Retained<NSView>,
     rows: RefCell<Vec<Retained<NSTableCellView>>>,
 }
+
+/// 列表容器的 ivars（指向泄漏的 [`Globals`]）。
+pub struct ListContainerIvars {
+    pub globals: *const Globals,
+}
+
+define_class!(
+    // SAFETY: NSView 无子类化约束；本类型不实现 Drop。
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ClipHubListContainerView"]
+    #[ivars = ListContainerIvars]
+    pub struct ListContainerView;
+
+    impl ListContainerView {
+        /// 点击全部落在容器上（行内 label/缩略图不再分散命中目标）。
+        #[unsafe(method(hitTest:))]
+        unsafe fn hit_test(&self, point: CGPoint) -> *mut AnyObject {
+            // 父类默认判定该视图层级是否包含该点；非 nil 则改返回自身
+            let hit: *mut AnyObject = unsafe { msg_send![super(self), hitTest: point] };
+            if hit.is_null() {
+                std::ptr::null_mut()
+            } else {
+                // SAFETY: 与 &self 同址（同一活动对象），调用方仅瞬时持有
+                self as *const Self as *mut AnyObject
+            }
+        }
+
+        /// 单击选择行（move_to，不关面板）；双击确认（明确意图，始终允许）。
+        #[unsafe(method(mouseUp:))]
+        unsafe fn mouse_up(&self, event: &NSEvent) {
+            let globals: &Globals = unsafe { &*self.ivars().globals };
+            let local = self.convertPoint_fromView(event.locationInWindow(), None);
+            let h = self.frame().size.height;
+            if h <= 0.0 {
+                return;
+            }
+            // Cocoa 底左坐标：行自顶部排布，row = (容器高 - y) / 行高
+            let row = ((h - local.y) / ROW_HEIGHT).floor();
+            if row < 0.0 {
+                return;
+            }
+            let row = row as usize;
+            if event.clickCount() >= 2 {
+                globals.confirm_at(row);
+            } else {
+                globals.move_to(row);
+            }
+        }
+    }
+);
 
 /// 列表行图片字节加载器（锁定 store 查 BLOB）。
 pub type ImageLoader<'a> = &'a dyn Fn(i64) -> Option<Vec<u8>>;
@@ -519,12 +591,14 @@ impl PanelController {
     /// # Safety
     ///
     /// - `runtime` 必须指向泄漏的 `Box<PanelRuntime>`（进程生命周期）
+    /// - `globals` 必须是泄漏的 [`Globals`]（列表容器鼠标事件回读用）
     /// - 必须在主线程调用
     pub unsafe fn new(
         mtm: MainThreadMarker,
         max_list_rows: usize,
         runtime: *mut PanelRuntime,
         controller: &AppController,
+        globals: &'static Globals,
     ) -> PanelController {
         unsafe {
             let rows_h = max_list_rows as f64 * ROW_HEIGHT;
@@ -578,7 +652,8 @@ impl PanelController {
                 cv.addSubview(&search);
             }
 
-            // 左栏：列表滚动容器（documentView = list_container，内容自顶部排布）
+            // 左栏：列表滚动容器（documentView = list_container，内容自顶部排布；
+            // 容器为子类：接管鼠标（单击选行 / 双击确认）
             let list_scroll = NSScrollView::initWithFrame(
                 NSScrollView::alloc(mtm),
                 rect(0.0, 0.0, LIST_WIDTH, rows_h + PANEL_PADDING * 2.0),
@@ -586,10 +661,14 @@ impl PanelController {
             list_scroll.setHasVerticalScroller(true);
             list_scroll.setScrollerStyle(NSScrollerStyle::Overlay);
             list_scroll.setDrawsBackground(false);
-            let list = NSView::initWithFrame(
-                NSView::alloc(mtm),
-                rect(0.0, 0.0, LIST_WIDTH, rows_h + PANEL_PADDING * 2.0),
-            );
+            let list_alloc =
+                ListContainerView::alloc(mtm).set_ivars(ListContainerIvars { globals });
+            let list: Retained<ListContainerView> = msg_send![super(list_alloc), initWithFrame: rect(
+                0.0,
+                0.0,
+                LIST_WIDTH,
+                rows_h + PANEL_PADDING * 2.0
+            )];
             list_scroll.setDocumentView(Some(&list));
             if let Some(cv) = panel.contentView() {
                 cv.addSubview(&list_scroll);

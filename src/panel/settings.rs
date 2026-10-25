@@ -4,13 +4,14 @@
 //! 保存/取消经 nil-target 之外显式 target 到 [`super::AppController`] 的
 //! `saveSettings:` / `closeSettings:`；保存校验失败弹 NSAlert 且不关窗。
 
+use objc2::define_class;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSBackingStoreType, NSBezelStyle, NSButton, NSColor, NSFont,
-    NSGlassEffectView, NSGlassEffectViewStyle, NSPopUpButton, NSTextField, NSWindow,
-    NSWindowStyleMask,
+    NSAlert, NSApplication, NSBackingStoreType, NSBeep, NSBezelStyle, NSButton, NSColor, NSEvent,
+    NSEventModifierFlags, NSFont, NSGlassEffectView, NSGlassEffectViewStyle, NSPopUpButton,
+    NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::NSString;
@@ -20,13 +21,20 @@ use crate::config::{Config, PasteMode};
 
 /// 窗口尺寸。
 pub const SETTINGS_WIDTH: f64 = 400.0;
-pub const SETTINGS_HEIGHT: f64 = 340.0;
+pub const SETTINGS_HEIGHT: f64 = 376.0;
+/// 顶部内缩：FullSizeContentView 下红绿灯画在内容区左上，表单整体下移避开。
+const TOP_INSET: f64 = 36.0;
 
-/// 表单行几何：第 `k` 行控件底 y（非翻转坐标，自顶部下排）。
+/// 表单容器高（= 窗口高 - 顶部内缩）。
+fn form_height() -> f64 {
+    SETTINGS_HEIGHT - TOP_INSET
+}
+
+/// 表单行几何：第 `k` 行控件底 y（容器内非翻转坐标，自顶部下排）。
 fn row_y(k: usize) -> f64 {
     let row_h = 24.0;
     let gap = 10.0;
-    let top = SETTINGS_HEIGHT - 16.0;
+    let top = form_height() - 16.0;
     top - (k as f64 + 1.0) * row_h - k as f64 * gap
 }
 
@@ -34,10 +42,104 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
 }
 
+/// 快捷键录制框的 ivars（无状态：捕获结果直接写自身 stringValue）。
+pub struct HotkeyRecorderIvars;
+
+define_class!(
+    // SAFETY: NSTextField 无子类化约束；本类型不实现 Drop。
+    #[unsafe(super(NSTextField))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "GlassClipHotkeyRecorder"]
+    #[ivars = HotkeyRecorderIvars]
+    pub struct HotkeyRecorderField;
+
+    impl HotkeyRecorderField {
+        /// 非可编辑字段默认不接受焦点，录制需要点击获得焦点。
+        #[unsafe(method(acceptsFirstResponder))]
+        unsafe fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        /// 点击进入录制（取得焦点）。
+        #[unsafe(method(mouseDown:))]
+        unsafe fn mouse_down(&self, _event: &NSEvent) {
+            if let Some(w) = self.window() {
+                w.makeFirstResponder(Some(self));
+            }
+        }
+
+        /// 捕获按键：修饰键 + 主键（字母/数字/F1-F12）合成 "Ctrl+Cmd+V" 风格字符串。
+        /// 纯修饰键不产生 keyDown（flagsChanged），自然忽略；不支持的键提示音并继续等待。
+        #[unsafe(method(keyDown:))]
+        unsafe fn key_down(&self, event: &NSEvent) {
+            let mods = event.modifierFlags();
+            let mut parts: Vec<String> = Vec::new();
+            if mods.contains(NSEventModifierFlags::Control) {
+                parts.push("Ctrl".to_string());
+            }
+            if mods.contains(NSEventModifierFlags::Option) {
+                parts.push("Alt".to_string());
+            }
+            if mods.contains(NSEventModifierFlags::Shift) {
+                parts.push("Shift".to_string());
+            }
+            if mods.contains(NSEventModifierFlags::Command) {
+                parts.push("Cmd".to_string());
+            }
+            let chars = event
+                .charactersIgnoringModifiers()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            match vk_to_key_name(event.keyCode(), &chars) {
+                Some(name) if !parts.is_empty() => {
+                    parts.push(name);
+                    self.setStringValue(&NSString::from_str(&parts.join("+")));
+                    // 退出录制，焦点还给窗口
+                    if let Some(w) = self.window() {
+                        w.makeFirstResponder(None);
+                    }
+                }
+                _ => {
+                    NSBeep();
+                }
+            }
+        }
+    }
+);
+
+/// 硬件 keyCode（+ 主键字符）→ `parse_hotkey` 兼容的主键名。
+/// 仅支持字母 / 数字 / F1-F12（与 parse_hotkey 支持集一致）；其余 `None`。
+fn vk_to_key_name(key_code: u16, chars: &str) -> Option<String> {
+    /// Apple kVK_F1..F12 硬件码表（不连续，必须查表）。
+    const F_KEYS: [(u16, u8); 12] = [
+        (122, 1),
+        (119, 2),
+        (99, 3),
+        (118, 4),
+        (96, 5),
+        (97, 6),
+        (98, 7),
+        (100, 8),
+        (101, 9),
+        (109, 10),
+        (103, 11),
+        (111, 12),
+    ];
+    if let Some((_, n)) = F_KEYS.iter().find(|(code, _)| *code == key_code) {
+        return Some(format!("F{n}"));
+    }
+    let mut it = chars.chars();
+    match (it.next(), it.next()) {
+        (Some(c), None) if c.is_ascii_alphabetic() => Some(c.to_ascii_uppercase().to_string()),
+        (Some(c), None) if c.is_ascii_digit() => Some(c.to_string()),
+        _ => None,
+    }
+}
+
 /// 设置窗口 + 表单控件句柄（泄漏单例，主线程访问）。
 pub struct SettingsWindow {
     pub window: Retained<NSWindow>,
-    hotkey_field: Retained<NSTextField>,
+    hotkey_field: Retained<HotkeyRecorderField>,
     ttl_field: Retained<NSTextField>,
     capacity_field: Retained<NSTextField>,
     paste_popup: Retained<NSPopUpButton>,
@@ -276,6 +378,15 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
             cv.addSubview(&glass);
         }
 
+        // 表单容器：整体位于红绿灯区域之下（TOP_INSET），行几何全部相对容器
+        let form = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            rect(0.0, 0.0, SETTINGS_WIDTH, form_height()),
+        );
+        if let Some(cv) = window.contentView() {
+            cv.addSubview(&form);
+        }
+
         let label = |text: &str, y: f64| {
             let l = NSTextField::labelWithString(&NSString::from_str(text), mtm);
             l.setFont(Some(&NSFont::systemFontOfSize(12.0)));
@@ -296,8 +407,17 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
             )
         };
 
-        // 1. 快捷键
-        let hotkey_field = field("如 Ctrl+Cmd+V", row_y(0), 226.0);
+        // 1. 快捷键（录制控件：点击后按组合键捕获）
+        let hotkey_alloc = HotkeyRecorderField::alloc(mtm).set_ivars(HotkeyRecorderIvars);
+        let hotkey_field: Retained<HotkeyRecorderField> = msg_send![super(hotkey_alloc), initWithFrame: rect(
+            158.0,
+            row_y(0),
+            226.0,
+            24.0
+        )];
+        hotkey_field.setPlaceholderString(Some(&NSString::from_str("点击后按组合键录制")));
+        hotkey_field.setEditable(false);
+        hotkey_field.setSelectable(false);
         // 2. 失效周期（天，0=永久）
         let ttl_field = field("0 = 永久", row_y(1), 226.0);
         // 3. 容量上限（条）
@@ -337,30 +457,45 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
         cancel_btn.setTarget(Some(target));
         cancel_btn.setAction(Some(objc2::sel!(closeSettings:)));
 
-        // 挂载：标签 + 控件 + 注记 + 按钮
+        // AX 授权提示（ad-hoc 签名重打包后需重新授权）
+        let ax_note = {
+            let n = NSTextField::labelWithString(
+                &NSString::from_str(
+                    "若已授权但无法自动粘贴：重新打包后请在系统设置删除 GlassClip 并重新授权",
+                ),
+                mtm,
+            );
+            n.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+            n.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            n.setFrame(rect(16.0, 52.0, SETTINGS_WIDTH - 32.0, 14.0));
+            n
+        };
+
+        // 挂载：玻璃 → 表单容器（标签 + 控件 + 注记 + 按钮）
         if let Some(cv) = window.contentView() {
-            cv.addSubview(&glass);
-            for (text, y) in [
-                ("快捷键", row_y(0)),
-                ("失效周期（天，0=永久）", row_y(1)),
-                ("容量上限（条）", row_y(2)),
-                ("粘贴模式", row_y(3)),
-                ("主题", row_y(4)),
-                ("列表行数", row_y(5)),
-            ] {
-                let l = label(text, y);
-                cv.addSubview(&l);
-            }
-            cv.addSubview(&hotkey_field);
-            cv.addSubview(&ttl_field);
-            cv.addSubview(&capacity_field);
-            cv.addSubview(&paste_popup);
-            cv.addSubview(&theme_popup);
-            cv.addSubview(&rows_field);
-            cv.addSubview(&rows_note);
-            cv.addSubview(&save_btn);
-            cv.addSubview(&cancel_btn);
+            cv.addSubview(&form);
         }
+        for (text, y) in [
+            ("快捷键", row_y(0)),
+            ("失效周期（天，0=永久）", row_y(1)),
+            ("容量上限（条）", row_y(2)),
+            ("粘贴模式", row_y(3)),
+            ("主题", row_y(4)),
+            ("列表行数", row_y(5)),
+        ] {
+            let l = label(text, y);
+            form.addSubview(&l);
+        }
+        form.addSubview(&hotkey_field);
+        form.addSubview(&ttl_field);
+        form.addSubview(&capacity_field);
+        form.addSubview(&paste_popup);
+        form.addSubview(&theme_popup);
+        form.addSubview(&rows_field);
+        form.addSubview(&rows_note);
+        form.addSubview(&ax_note);
+        form.addSubview(&save_btn);
+        form.addSubview(&cancel_btn);
 
         SettingsWindow {
             window,
@@ -370,6 +505,50 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
             paste_popup,
             theme_popup,
             rows_field,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hotkey::parse_hotkey;
+    use global_hotkey::hotkey::{Code, Modifiers};
+
+    #[test]
+    fn vk_letters_and_digits() {
+        assert_eq!(vk_to_key_name(9, "v"), Some("V".to_string()));
+        assert_eq!(vk_to_key_name(0, "a"), Some("A".to_string()));
+        assert_eq!(vk_to_key_name(18, "1"), Some("1".to_string()));
+    }
+
+    #[test]
+    fn vk_f_key_table() {
+        assert_eq!(vk_to_key_name(122, ""), Some("F1".to_string()));
+        assert_eq!(vk_to_key_name(99, ""), Some("F3".to_string()));
+        assert_eq!(vk_to_key_name(111, ""), Some("F12".to_string()));
+    }
+
+    #[test]
+    fn vk_unsupported_is_none() {
+        // 方向键功能字符 / 空格 / 多字符（死键组合）/ 空串都不支持
+        assert_eq!(vk_to_key_name(125, "\u{f701}"), None);
+        assert_eq!(vk_to_key_name(49, " "), None);
+        assert_eq!(vk_to_key_name(0, "ab"), None);
+        assert_eq!(vk_to_key_name(0, ""), None);
+    }
+
+    #[test]
+    fn recorder_output_parses() {
+        // 录制产物（修饰序固定 Ctrl,Alt,Shift,Cmd + 主键名）必然可解析，
+        // 且与 format_hotkey 的往返性质一致
+        for (mods, code) in [
+            (Modifiers::CONTROL | Modifiers::META, Code::KeyV),
+            (Modifiers::ALT, Code::F5),
+            (Modifiers::SHIFT, Code::Digit9),
+        ] {
+            let s = crate::hotkey::format_hotkey(mods, code);
+            assert_eq!(parse_hotkey(&s).unwrap(), (mods, code), "{s}");
         }
     }
 }

@@ -39,6 +39,40 @@ pub fn parse_hotkey(s: &str) -> anyhow::Result<(Modifiers, Code)> {
     Ok((modifiers, code))
 }
 
+/// 解析的逆：(修饰键, 主键) → 规范字符串（如 `"Ctrl+Alt+Shift+Cmd+V"`）。
+///
+/// 修饰键顺序固定 `Ctrl, Alt, Shift, Cmd`；`parse_hotkey(format_hotkey(m, c)) == (m, c)`
+/// 往返成立（见测试）。
+pub fn format_hotkey(mods: Modifiers, code: Code) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if mods.contains(Modifiers::CONTROL) {
+        parts.push("Ctrl".to_string());
+    }
+    if mods.contains(Modifiers::ALT) {
+        parts.push("Alt".to_string());
+    }
+    if mods.contains(Modifiers::SHIFT) {
+        parts.push("Shift".to_string());
+    }
+    if mods.contains(Modifiers::META) {
+        parts.push("Cmd".to_string());
+    }
+    parts.push(main_key_name(code));
+    parts.join("+")
+}
+
+/// `Code` → 主键段名（`parse_main_key` 的逆）：`KeyV`→"V"、`Digit3`→"3"、`F5`→"F5"。
+fn main_key_name(code: Code) -> String {
+    let s = code.to_string();
+    if let Some(rest) = s.strip_prefix("Key") {
+        rest.to_string()
+    } else if let Some(rest) = s.strip_prefix("Digit") {
+        rest.to_string()
+    } else {
+        s // F1..F12 无前缀
+    }
+}
+
 /// 修饰键段（已 trim）→ `Modifiers` 旗标；非修饰键返回 `None`。
 fn parse_modifier(segment: &str) -> Option<Modifiers> {
     match segment.to_ascii_lowercase().as_str() {
@@ -225,5 +259,42 @@ mod tests {
     fn err_f_key_out_of_range() {
         assert!(parse_hotkey("Cmd+F0").is_err());
         assert!(parse_hotkey("Cmd+F13").is_err());
+    }
+
+    #[test]
+    fn format_parse_roundtrip() {
+        let combos = [
+            (Modifiers::CONTROL, Code::KeyV),
+            (Modifiers::META, Code::KeyV),
+            (Modifiers::CONTROL | Modifiers::META, Code::KeyV),
+            (
+                Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT | Modifiers::META,
+                Code::KeyA,
+            ),
+            (Modifiers::META, Code::Digit1),
+            (Modifiers::ALT, Code::F12),
+            (Modifiers::SHIFT | Modifiers::META, Code::F1),
+        ];
+        for (mods, code) in combos {
+            let formatted = format_hotkey(mods, code);
+            assert_eq!(
+                parse_hotkey(&formatted).unwrap(),
+                (mods, code),
+                "roundtrip of {formatted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_fixed_modifier_order() {
+        // 顺序固定 Ctrl, Alt, Shift, Cmd（与输入顺序无关）
+        assert_eq!(
+            format_hotkey(Modifiers::META | Modifiers::CONTROL, Code::KeyV),
+            "Ctrl+Cmd+V"
+        );
+        assert_eq!(
+            format_hotkey(Modifiers::SHIFT | Modifiers::ALT, Code::Digit9),
+            "Alt+Shift+9"
+        );
     }
 }
