@@ -42,7 +42,7 @@ pub fn parse_hotkey(s: &str) -> anyhow::Result<(Modifiers, Code)> {
 /// 修饰键段（已 trim）→ `Modifiers` 旗标；非修饰键返回 `None`。
 fn parse_modifier(segment: &str) -> Option<Modifiers> {
     match segment.to_ascii_lowercase().as_str() {
-        "cmd" | "command" | "meta" | "super" | "win" => Some(Modifiers::SUPER),
+        "cmd" | "command" | "meta" | "super" | "win" => Some(Modifiers::META),
         "shift" => Some(Modifiers::SHIFT),
         "alt" | "option" => Some(Modifiers::ALT),
         "ctrl" | "control" => Some(Modifiers::CONTROL),
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn ok_cmd_shift_v() {
         let (mods, code) = parse_hotkey("Cmd+Shift+V").unwrap();
-        assert!(mods.contains(Modifiers::SUPER));
+        assert!(mods.contains(Modifiers::META));
         assert!(mods.contains(Modifiers::SHIFT));
         assert_eq!(code, Code::KeyV);
     }
@@ -146,7 +146,7 @@ mod tests {
         let (mods, code) = parse_hotkey("ctrl+alt+t").unwrap();
         assert!(mods.contains(Modifiers::CONTROL));
         assert!(mods.contains(Modifiers::ALT));
-        assert!(!mods.contains(Modifiers::SUPER));
+        assert!(!mods.contains(Modifiers::META));
         assert_eq!(code, Code::KeyT);
     }
 
@@ -154,7 +154,7 @@ mod tests {
     fn modifier_aliases_map_to_super() {
         for alias in ["Cmd", "command", "META", "super", "Win"] {
             let (mods, code) = parse_hotkey(&format!("{alias}+P")).unwrap();
-            assert!(mods.contains(Modifiers::SUPER), "alias {alias:?}");
+            assert!(mods.contains(Modifiers::META), "alias {alias:?}");
             assert_eq!(code, Code::KeyP);
         }
     }
@@ -163,7 +163,7 @@ mod tests {
     fn modifier_alias_option_maps_to_alt() {
         let (mods, _) = parse_hotkey("Option+K").unwrap();
         assert!(mods.contains(Modifiers::ALT));
-        assert!(!mods.contains(Modifiers::SUPER));
+        assert!(!mods.contains(Modifiers::META));
     }
 
     #[test]
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn segments_are_trimmed() {
         let (mods, code) = parse_hotkey("  Cmd + Shift + V  ").unwrap();
-        assert!(mods.contains(Modifiers::SUPER) && mods.contains(Modifiers::SHIFT));
+        assert!(mods.contains(Modifiers::META) && mods.contains(Modifiers::SHIFT));
         assert_eq!(code, Code::KeyV);
     }
 

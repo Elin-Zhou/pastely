@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 /// 顶层配置（`[hotkey]` / `[storage]` / `[paste]` / `[ui]` 四节）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub hotkey: HotkeyConfig,
@@ -60,17 +60,6 @@ pub struct UiConfig {
 pub enum PasteMode {
     Auto,
     CopyOnly,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            hotkey: HotkeyConfig::default(),
-            storage: StorageConfig::default(),
-            paste: PasteConfig::default(),
-            ui: UiConfig::default(),
-        }
-    }
 }
 
 impl Default for HotkeyConfig {

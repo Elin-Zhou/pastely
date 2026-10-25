@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Context;
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::model::{text_preview, ClipKind, NewClipItem, SearchableItem};
+use crate::model::{make_preview, now_ms, ClipKind, NewClipItem, SearchableItem};
 
 /// 一天的毫秒数（TTL 计算用）。
 const DAY_MS: i64 = 86_400_000;
@@ -166,7 +166,8 @@ fn searchable_sql(limit: Option<&str>) -> String {
 /// 行 → [`SearchableItem`]。preview 截断保留前缀，故高亮索引可直接沿用。
 fn searchable_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchableItem> {
     let id: i64 = row.get(0)?;
-    let kind = ClipKind::parse(&row.get::<_, String>(1)?).ok_or_else(|| invalid_kind_error(row))?;
+    let kind =
+        ClipKind::from_db(&row.get::<_, String>(1)?).ok_or_else(|| invalid_kind_error(row))?;
     let text_content: Option<String> = row.get(2)?;
     let img_w: Option<u32> = row.get(3)?;
     let img_h: Option<u32> = row.get(4)?;
@@ -179,7 +180,7 @@ fn searchable_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchableIt
     Ok(SearchableItem {
         id,
         kind,
-        text_preview: text_preview(&full_text),
+        text_preview: make_preview(&full_text),
         full_text,
         img_size: match (img_w, img_h) {
             (Some(w), Some(h)) => Some((w, h)),
@@ -200,14 +201,6 @@ fn invalid_kind_error(row: &rusqlite::Row<'_>) -> rusqlite::Error {
         rusqlite::types::Type::Text,
         format!("invalid clip kind: {value}").into(),
     )
-}
-
-/// 当前 unix epoch 毫秒。
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

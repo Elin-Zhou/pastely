@@ -36,7 +36,7 @@ pub fn fuzzy_filter(items: &[SearchableItem], query: &str) -> Vec<(SearchableIte
             Some((score, item.clone(), highlights))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
     scored
         .into_iter()
         .map(|(_, item, highlights)| (item, highlights))
@@ -51,7 +51,7 @@ mod tests {
         SearchableItem {
             id,
             kind: ClipKind::Text,
-            text_preview: crate::model::text_preview(full_text),
+            text_preview: crate::model::make_preview(full_text),
             full_text: full_text.to_string(),
             img_size: None,
             created_at: id,
