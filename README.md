@@ -1,36 +1,72 @@
 # Pastely
 
-macOS 剪贴板历史管理器（Rust + AppKit）：菜单栏常驻、模糊搜索弹窗、图片预览、真液态玻璃分栏 UI（macOS 26 `NSGlassEffectView`）。
+A macOS clipboard history manager with fuzzy search, built in **pure Rust + AppKit** — no WebView, no Electron.
 
-## 构建
+Press a global hotkey to summon a centered liquid-glass panel, type to fuzzy-search everything you've ever copied (text & images), hit <kbd>↩</kbd> to paste it right where you were.
+
+<!-- TODO: add panel screenshot: <div align="center"><img src=".github/screenshot.png" width="640" alt="Pastely panel"></div> -->
+
+## Features
+
+- 📋 **Full clipboard history** — every text snippet and image you copy is captured in the background (deduplicated, capacity-capped, TTL-expired)
+- 🔍 **Fuzzy search** — instant filtering with match highlighting; focus lands in the search field automatically, Chinese IME friendly
+- 🖼 **Image previews** — thumbnails in the list, full-size preview pane
+- ⚡️ **Paste-back** — pick an entry and it's pasted into the app you were working in (via Accessibility, with graceful copy-only fallback)
+- 🧊 **Liquid Glass UI** — macOS 26 `NSGlassEffectView`, split-pane layout with live preview, automatic light/dark adaptation
+- ⌨️ **Keyboard-first** — ↑↓ navigate, ↩ paste, Esc dismiss, mouse click to select / double-click to paste
+- ⚙️ **In-app settings** — hotkey recorder, TTL, capacity, paste mode, theme, launch-at-login (asked on first run)
+
+## Install
+
+Grab the latest `Pastely-x.y.z.dmg` from [Releases](https://github.com/Elin-Zhou/pastely/releases), open it and drag **Pastely** onto **Applications**.
+
+> **First launch**: macOS will ask for **Accessibility** permission (System Settings → Privacy & Security → Accessibility → enable **Pastely**) so Pastely can paste into other apps. Without it, selecting an entry still copies it to the clipboard.
+>
+> Ad-hoc signed builds (e.g. built from source) need re-authorization after each rebuild.
+
+## Build from source
 
 ```bash
 cargo build --release
+bash scripts/bundle_app.sh   # produces dist/Pastely.app + dist/Pastely-x.y.z.dmg
 ```
 
-## 打包
+## Configuration
 
-```bash
-bash scripts/bundle_app.sh
+All settings live in the in-app settings window (⌘, or the status-bar menu), persisted to
+`~/Library/Application Support/Pastely/config.toml`.
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| Hotkey | `Ctrl+Cmd+V` | recorded by pressing the combo |
+| History TTL | 30 days | `0` = keep forever; pinned entries exempt |
+| Capacity | 1000 entries | oldest unpinned evicted |
+| Paste mode | auto | `auto` = simulate ⌘V after copying |
+| Theme | follow system | `light` / `dark` / `auto` |
+| Launch at login | off | asked on first run |
+
+## Architecture
+
+Single native process — AppKit run loop on the main thread (panel, status item, timers), SQLite (`rusqlite`) for history, `global-hotkey` for the shortcut, `fuzzy-matcher` (SkimMatcherV2) for search. No third-party UI framework.
+
+```
+src/
+├── main.rs          # assembly: data dir/migration, logging, timers, status bar
+├── clipboard/       # NSPasteboard watcher (changeCount polling, limits, self-echo guard)
+├── store/           # SQLite history store + migrations
+├── panel/           # NSPanel (nonactivating), search field editor, list, preview, paste-back
+├── settings.rs      # glass settings window + hotkey recorder
+├── config.rs        # TOML config with defaults
+├── search.rs        # fuzzy filter + highlight mapping (char → UTF-16)
+├── hotkey.rs        # hotkey parsing/formatting + GlobalHotKeyManager wrapper
+├── model.rs         # data model, hashing, preview
+└── ttl.rs           # expiry/capacity reaping
 ```
 
-产出 `dist/Pastely.app` 与 `dist/Pastely-0.1.0.dmg`（ad-hoc 签名；分发请用开发者证书重签）。
+## 中文简介
 
-## 安装
+macOS 剪贴板历史管理器（纯 Rust + AppKit，无 WebView）：菜单栏常驻，全局快捷键唤起液态玻璃分栏弹窗，输入即模糊搜索全部历史（文本 + 图片），回车直接粘贴回原应用。支持失效周期、容量上限、开机自启动与深浅色自适应。构建与打包见上文，安装包可从 Releases 页面下载。
 
-打开 `dist/Pastely-0.1.0.dmg`，把 **Pastely.app** 拖动到 Applications 后启动。
+## License
 
-**首次运行需授权辅助功能**（自动粘贴依赖模拟 ⌘V）：
-系统设置 → 隐私与安全性 → 辅助功能 → 勾选 Pastely。
-未授权时自动粘贴降级为仅复制，面板顶部会出现横幅，点「打开系统设置」可直达授权页。
-
-## 使用
-
-- 默认快捷键 `Ctrl+Cmd+V` 唤起面板；输入即模糊过滤，↑↓ 选择、⏎ 确认、数字键 `1-9` 直达
-- 菜单栏 📋 图标：显示 / 设置…（⌘,）/ 暂停记录 / 清空历史 / 在 Finder 中显示配置 / 退出
-
-## 配置
-
-菜单栏「设置…」可调整：快捷键（保存即热重载）、失效周期（天，0=永久）、容量上限（条）、粘贴模式（自动粘贴 / 仅复制）、主题（跟随系统 / 浅色 / 深色，保存即生效）、列表行数（下次启动生效）。
-
-配置文件位置：`~/Library/Application Support/cliphub/config.toml`（历史库同目录 `history.db`）。
+[MIT](LICENSE) © Elin-Zhou
