@@ -1,4 +1,4 @@
-# GlassClip
+# Pastely
 
 macOS 剪贴板历史管理器（Rust + AppKit）：菜单栏常驻、模糊搜索弹窗、图片预览、真液态玻璃分栏 UI（macOS 26 `NSGlassEffectView`）。
 
@@ -14,14 +14,14 @@ cargo build --release
 bash scripts/bundle_app.sh
 ```
 
-产出 `dist/GlassClip.app` 与 `dist/GlassClip-0.1.0.dmg`（ad-hoc 签名；分发请用开发者证书重签）。
+产出 `dist/Pastely.app` 与 `dist/Pastely-0.1.0.dmg`（ad-hoc 签名；分发请用开发者证书重签）。
 
 ## 安装
 
-打开 `dist/GlassClip-0.1.0.dmg`，把 **GlassClip.app** 拖动到 Applications 后启动。
+打开 `dist/Pastely-0.1.0.dmg`，把 **Pastely.app** 拖动到 Applications 后启动。
 
 **首次运行需授权辅助功能**（自动粘贴依赖模拟 ⌘V）：
-系统设置 → 隐私与安全性 → 辅助功能 → 勾选 GlassClip。
+系统设置 → 隐私与安全性 → 辅助功能 → 勾选 Pastely。
 未授权时自动粘贴降级为仅复制，面板顶部会出现横幅，点「打开系统设置」可直达授权页。
 
 ## 使用

@@ -214,13 +214,13 @@ impl Globals {
                 tracing::warn!(
                     "AX 授权检查未通过（is_ax_trusted=false），本次降级为仅复制。\
                      若系统设置中已开启：ad-hoc 签名在重新打包后需删除旧条目重新授权\
-                     （系统设置中选中 GlassClip 按 '-' 删除，再触发一次粘贴以弹出授权框）"
+                     （系统设置中选中 Pastely 按 '-' 删除，再触发一次粘贴以弹出授权框）"
                 );
                 let mut hinted = self.ax_hint_shown.borrow_mut();
                 if !*hinted {
                     *hinted = true;
                     tracing::info!(
-                        "提示：系统设置 → 隐私与安全性 → 辅助功能 中勾选 GlassClip 后可自动粘贴"
+                        "提示：系统设置 → 隐私与安全性 → 辅助功能 中勾选 Pastely 后可自动粘贴"
                     );
                 }
             }
@@ -931,7 +931,24 @@ pub unsafe fn build_status_bar() {
         let mtm = MainThreadMarker::new().expect("main thread");
         let item =
             NSStatusBar::systemStatusBar().statusItemWithLength(NS_STATUS_ITEM_VARIABLE_LENGTH);
-        if let Some(button) = item.button(mtm) {
+        // 原生 SF Symbol 模板图：自动适配菜单栏深浅色（emoji 不随主题）
+        let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("clipboard.on"),
+            None,
+        )
+        .or_else(|| {
+            NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                &NSString::from_str("clipboard"),
+                None,
+            )
+        });
+        if let Some(img) = symbol {
+            img.setTemplate(true);
+            if let Some(button) = item.button(mtm) {
+                button.setImage(Some(&img));
+            }
+        } else if let Some(button) = item.button(mtm) {
+            // 兜底：符号不可用时退回文字
             button.setTitle(&NSString::from_str("📋"));
         }
         let menu = NSMenu::new(mtm);
@@ -944,7 +961,7 @@ pub unsafe fn build_status_bar() {
             );
             menu.addItem(&mi);
         };
-        add(&menu, "显示 GlassClip", objc2::sel!(showPanel:), "");
+        add(&menu, "显示 Pastely", objc2::sel!(showPanel:), "");
         add(&menu, "设置…", objc2::sel!(openSettings:), ",");
         add(&menu, "暂停记录", objc2::sel!(togglePause:), "");
         menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -956,7 +973,7 @@ pub unsafe fn build_status_bar() {
             "",
         );
         menu.addItem(&NSMenuItem::separatorItem(mtm));
-        add(&menu, "退出 GlassClip", objc2::sel!(quitApp:), "q");
+        add(&menu, "退出 Pastely", objc2::sel!(quitApp:), "q");
         item.setMenu(Some(&menu));
         // 状态栏 item 进程生命周期持有
         std::mem::forget(item);

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# GlassClip 打包：release 构建 → GlassClip.app（Info.plist + 图标）→ ad-hoc 签名 → DMG
+# Pastely 打包：release 构建 → Pastely.app（Info.plist + 图标）→ ad-hoc 签名 → DMG
 cd "$(dirname "$0")/.."
 
-APP_NAME="GlassClip"
-BUNDLE_ID="com.xelin.glassclip"
+APP_NAME="Pastely"
+BUNDLE_ID="com.xelin.pastely"
 VERSION="0.1.0"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"

@@ -49,7 +49,7 @@ define_class!(
     // SAFETY: NSTextField 无子类化约束；本类型不实现 Drop。
     #[unsafe(super(NSTextField))]
     #[thread_kind = MainThreadOnly]
-    #[name = "GlassClipHotkeyRecorder"]
+    #[name = "PastelyHotkeyRecorder"]
     #[ivars = HotkeyRecorderIvars]
     pub struct HotkeyRecorderField;
 
@@ -359,7 +359,7 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
             NSBackingStoreType::Buffered,
             false,
         );
-        window.setTitle(&NSString::from_str("GlassClip 设置"));
+        window.setTitle(&NSString::from_str("Pastely 设置"));
         window.setTitleVisibility(objc2_app_kit::NSWindowTitleVisibility::Hidden);
         window.setTitlebarAppearsTransparent(true);
         window.setReleasedWhenClosed(false);
@@ -461,7 +461,7 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
         let ax_note = {
             let n = NSTextField::labelWithString(
                 &NSString::from_str(
-                    "若已授权但无法自动粘贴：重新打包后请在系统设置删除 GlassClip 并重新授权",
+                    "若已授权但无法自动粘贴：重新打包后请在系统设置删除 Pastely 并重新授权",
                 ),
                 mtm,
             );
