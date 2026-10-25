@@ -5,7 +5,8 @@
 （板身描边 + 顶部夹子实心 + 三条内容线 + 描边外发光）。
 
 实现：4× 超采样（4096²）逐像素判定后盒式滤波降采样到 1024²（平滑边缘）。
-背景全幅方形——macOS 自动套圆角遮罩，无需自绘圆角。
+背景自绘 Apple 比例圆角矩形（圆角半径 ≈ 22.37% 画布，squircle 近似），
+圆角外部透明——避免系统 plate 白底上出现直角渐变方块。
 输出单张 1024 PNG；各尺寸由 scripts/bundle_app.sh 用 sips 缩放生成 iconset。
 
 用法：python3 scripts/gen_icon.py <输出.png 路径>
@@ -18,6 +19,8 @@ import zlib
 SS = 4                     # 超采样倍数
 OUT = 1024                 # 输出边长
 SIZE = OUT * SS            # 绘制边长（4096）
+
+BG_R = 0.2237              # 背景圆角半径（Apple 图标比例）
 
 GRAD_TOP = (99, 102, 241)   # #6366F1 indigo-500
 GRAD_BOTTOM = (168, 85, 247)  # #A855F7 purple-500
@@ -85,6 +88,10 @@ def render() -> list[bytes]:
         srow = buf[py // SS]
         for px in range(SIZE):
             gx = (px + 0.5) / SIZE
+            # 圆角画布外：透明（系统 plate 只在极窄边缘可见）
+            if not in_rounded_rect(gx, gy, 0.0, 0.0, 1.0, 1.0, BG_R):
+                out_px = px // SS
+                continue
             # 优先级：夹子实心 > 板身描边 > 内容线 > 发光带 > 渐变底
             if in_rounded_rect(gx, gy, *tab, TAB_R):
                 color, alpha = WHITE, 255
