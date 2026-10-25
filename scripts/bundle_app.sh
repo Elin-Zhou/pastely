@@ -73,7 +73,8 @@ codesign --force -s - "$APP"
 # DMG 设计化：AppKit 渲染背景图 → 可读写临时 DMG + Finder 图标布局 → 压缩只读成品
 BG_DIR="$DIST/.background_tmp"
 mkdir -p "$BG_DIR"
-cargo run --release --bin gen_dmg_bg -- "$BG_DIR/dmg_bg.png"
+cargo run --release --bin gen_dmg_bg -- "$BG_DIR/dmg_bg.png" 1
+cargo run --release --bin gen_dmg_bg -- "$BG_DIR/dmg_bg@2x.png" 2
 
 rm -f "$DIST/tmp_rw.dmg"
 # 挂载点被占（用户开着旧 DMG）时，临时卷改用 -build 后缀名
@@ -91,7 +92,9 @@ hdiutil attach "$DIST/tmp_rw.dmg" -mountpoint "$MNT" -nobrowse -quiet
 cp -R "$APP" "$MNT/"
 ln -s /Applications "$MNT/Applications"
 mkdir -p "$MNT/.background"
-cp "$BG_DIR/dmg_bg.png" "$MNT/.background/dmg_bg.png"
+# 多表示 TIFF（1x + 2x 合一）：Finder 在 Retina 屏自动选用 2x 层（LightCraft 同款方案）
+tiffutil -cathidpicheck "$BG_DIR/dmg_bg.png" "$BG_DIR/dmg_bg@2x.png" -out "$BG_DIR/background.tiff" >/dev/null
+cp "$BG_DIR/background.tiff" "$MNT/.background/background.tiff"
 
 # Finder 布局：窗口尺寸对应背景图，图标摆在右区中部（避开标题与底部提示）
 # osascript 失败不中断打包（退化为普通 DMG 布局）
@@ -107,24 +110,28 @@ tell application "Finder"
     set arrangement of viewOptions to not arranged
     set icon size of viewOptions to 96
     set text size of viewOptions to 15
-    set background picture of viewOptions to file ".background:dmg_bg.png"
+    set background picture of viewOptions to file ".background:background.tiff"
     set position of item "$APP_NAME.app" of container window to {432, 252}
     set position of item "Applications" of container window to {632, 252}
-    close
-    open
     update without registering applications
   end tell
 end tell
 APPLESCRIPT
 sleep 2
+# 关闭窗口促使 Finder 尽早落盘 .DS_Store（图标摆位/背景引用都在其中）
+osascript -e 'tell application "Finder" to close every window' 2>/dev/null || true
+sleep 2
 
-# 卸载：Finder 可能仍持有窗口，强卸 + 重试；仍失败则报错退出（保留现场）
-if ! hdiutil detach "$MNT" -force >/dev/null 2>&1; then
-    sleep 2
-    if ! hdiutil detach "$MNT" -force >/dev/null 2>&1; then
-        echo "警告：未能卸载 $MNT，跳过压缩（临时 DMG 保留在 $DIST/tmp_rw.dmg）" >&2
-        exit 1
-    fi
+# 卸载：先关全部 Finder 窗口释放占用，普通卸载多次重试，最后才强卸
+osascript -e 'tell application "Finder" to close every window' 2>/dev/null || true
+DETACHED=0
+for i in 1 2 3 4 5; do
+    sleep 1
+    if hdiutil detach "$MNT" >/dev/null 2>&1; then DETACHED=1; break; fi
+done
+if [ "$DETACHED" -ne 1 ]; then
+    echo "WARN: cannot detach $MNT, keep tmp dmg at $DIST/tmp_rw.dmg" >&2
+    exit 1
 fi
 hdiutil convert "$DIST/tmp_rw.dmg" -format UDZO -o "$DIST/$APP_NAME-$VERSION.dmg" -ov -quiet
 rm -f "$DIST/tmp_rw.dmg"

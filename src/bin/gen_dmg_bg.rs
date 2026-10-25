@@ -24,12 +24,16 @@ const W: f64 = 880.0;
 /// 逻辑高（pt）。
 const H: f64 = 560.0;
 /// 渲染倍率：2x Retina，Finder 缩到逻辑窗口显示。
-const SCALE: f64 = 1.0;
+static mut SCALE: f64 = 1.0;
+
+fn scale() -> f64 {
+    unsafe { SCALE }
+}
 /// 左区宽（逻辑，37.5%）。
 const LEFT_W: f64 = 330.0;
 
 fn s(v: f64) -> f64 {
-    v * SCALE
+    v * scale()
 }
 
 fn srgb(r: f64, g: f64, b: f64, a: f64) -> Retained<NSColor> {
@@ -181,13 +185,20 @@ fn main() {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "dmg_bg.png".to_string());
+    let scale_factor: f64 = args
+        .get(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0);
+    unsafe {
+        SCALE = scale_factor;
+    }
     let mtm = MainThreadMarker::new().expect("必须主线程渲染");
     render(&out, mtm);
-    println!("dmg background written: {out}");
+    println!("dmg background written: {out} (scale {scale_factor})");
 }
 
 fn render(out: &str, _mtm: MainThreadMarker) {
-    // 离屏 RGBA 位图（逻辑 × SCALE，bytesPerRow/bitsPerPixel 交由系统决定）
+    // 离屏 RGBA 位图（逻辑 × scale()，bytesPerRow/bitsPerPixel 交由系统决定）
     let rep = unsafe {
         NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
             NSBitmapImageRep::alloc(),
