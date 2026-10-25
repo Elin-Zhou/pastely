@@ -1,7 +1,9 @@
 //! 粘贴回填：辅助功能权限检测 + 模拟 ⌘V 键盘事件。
 //!
-//! 非激活面板保证原应用始终保持前台，因此 `CGEventPost(kCGHIDEventTap)`
-//! 即可把事件送回用户原本操作的输入位置，无需定位目标 pid。
+//! 非激活面板保证原应用始终保持前台，事件经 `CGEventTapLocation::Session`
+//! （kCGSessionEventTap）投递即可把 ⌘V 送回用户原本操作的输入位置，
+//! 无需定位目标 pid；Session 口与 HID 口等效但作用域限定登录会话，
+//! 受限环境（终端继承 TCC、无 root 守护）下更可靠。
 
 use anyhow::anyhow;
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
@@ -21,7 +23,7 @@ pub fn is_ax_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
-/// 向系统 HID 事件口发送一次 Cmd+V 按下/抬起。
+/// 向会话事件口发送一次 Cmd+V 按下/抬起（kCGSessionEventTap）。
 pub fn send_cmd_v() -> anyhow::Result<()> {
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
         .map_err(|()| anyhow!("创建 CGEventSource 失败"))?;
@@ -34,8 +36,8 @@ pub fn send_cmd_v() -> anyhow::Result<()> {
     let up = CGEvent::new_keyboard_event(source, K_VK_ANSI_V, false)
         .map_err(|()| anyhow!("创建 Cmd+V keyup 事件失败"))?;
     up.set_flags(cmd);
-    down.post(CGEventTapLocation::HID);
-    up.post(CGEventTapLocation::HID);
+    down.post(CGEventTapLocation::Session);
+    up.post(CGEventTapLocation::Session);
     Ok(())
 }
 

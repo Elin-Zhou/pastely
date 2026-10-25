@@ -4,8 +4,8 @@
 //! - [`Globals`]：泄漏一次的全局状态（store/config/watcher/hotkey/panel/runtime 句柄）
 //! - [`AppController`]：NSObject 子类，承载全部 NSTimer tick、状态栏菜单动作与
 //!   window/搜索框 delegate 协议
-//! - [`PanelController`]：非激活 NSPanel，左右分栏——左列搜索框 + 列表、
-//!   右列预览区；液态玻璃底（NSVisualEffectView）+ 深浅色自适应
+//! - [`PanelController`]：非激活 NSPanel，左右分栏——左列搜索框 + 滚动列表、
+//!   右列预览区；真液态玻璃底（NSGlassEffectView）+ 深浅色自适应
 //! - [`PanelRuntime`]：field editor 键盘回调访问的列表选择状态
 //!
 //! 非激活面板保证唤起时原应用不失活——粘贴回填 `CGEventPost` 直接落回原应用。
@@ -25,11 +25,11 @@ use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSAlertSecondButtonReturn, NSAppearance, NSAppearanceCustomization, NSAppearanceName,
     NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDelegate, NSBackingStoreType, NSBox, NSBoxType, NSColor,
-    NSControlTextEditingDelegate, NSFont, NSImage, NSImageView, NSMenu, NSMenuItem, NSPanel,
-    NSScreen, NSSearchField, NSSearchFieldDelegate, NSStatusBar, NSTableCellView, NSTextAlignment,
-    NSTextField, NSTextFieldDelegate, NSTextView, NSView, NSVisualEffectBlendingMode,
-    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowDelegate,
+    NSApplicationDelegate, NSBackingStoreType, NSBezelStyle, NSBox, NSBoxType, NSButton, NSColor,
+    NSControlTextEditingDelegate, NSFont, NSGlassEffectView, NSGlassEffectViewStyle, NSImage,
+    NSImageView, NSMenu, NSMenuItem, NSPanel, NSScreen, NSScrollView, NSScrollerStyle,
+    NSSearchField, NSSearchFieldDelegate, NSStatusBar, NSTableCellView, NSTextAlignment,
+    NSTextField, NSTextFieldDelegate, NSTextView, NSView, NSWindow, NSWindowDelegate,
     NSWindowStyleMask, NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -53,6 +53,13 @@ pub const LIST_WIDTH: f64 = 320.0;
 pub const SEARCH_BAR_HEIGHT: f64 = 40.0;
 /// 上下边距（pt）。
 pub const PANEL_PADDING: f64 = 8.0;
+/// AX 未授权横幅高度（pt）。
+pub const BANNER_HEIGHT: f64 = 28.0;
+
+/// 列表全量重建上限（行）：滚动列表后不再截断到 `max_list_rows`
+/// （后者仅决定面板高度）；200 行 × 3 子视图 ≈ 600 view 全建尚可，
+/// 实测卡顿再做虚拟化（v1.1）。数字键 1-9 仍只标注前 9 行。
+const LIST_REBUILD_LIMIT: usize = 200;
 
 /// `NSStatusItemVariableLength`（AppKit 语义：状态栏 item 宽度随内容自适应）。
 /// objc2-app-kit 0.3.2 未导出该常量，按 Apple 文档取值 -1.0。
@@ -85,7 +92,7 @@ impl Globals {
         Some(unsafe { &mut *ptr })
     }
 
-    /// 查询变化：重算过滤结果并刷新列表（≤1000 条，主线程亚毫秒）。
+    /// 查询变化：重算过滤结果并刷新列表（全量重建上限 200 行，主线程亚毫秒）。
     pub fn refresh_search(&self, query: &str) {
         let Some(rt) = self.runtime() else {
             return;
@@ -95,7 +102,8 @@ impl Globals {
             store.all_searchable().unwrap_or_default()
         };
         rt.filtered = fuzzy_filter(&items, query);
-        rt.filtered.truncate(self.config.ui.max_list_rows);
+        // 滚动列表：不再截断到 max_list_rows（它仅决定面板高度）
+        rt.filtered.truncate(LIST_REBUILD_LIMIT);
         rt.selected = 0;
         if let Some(p) = self.panel() {
             p.update_list(&rt.filtered, rt.selected, &|id| {
@@ -167,9 +175,16 @@ impl Globals {
             p.hide();
         }
         if matches!(self.config.paste.mode, PasteMode::Auto) {
-            if paste_back::is_ax_trusted() {
-                if let Err(e) = paste_back::send_cmd_v() {
-                    tracing::error!("模拟 ⌘V 失败: {e:#}");
+            let trusted = paste_back::is_ax_trusted();
+            tracing::info!(
+                "paste-back: ax_trusted={} mode={:?}",
+                trusted,
+                self.config.paste.mode
+            );
+            if trusted {
+                match paste_back::send_cmd_v() {
+                    Ok(()) => tracing::info!("paste-back: Cmd+V 已投递（session tap）"),
+                    Err(e) => tracing::error!("paste-back: 投递失败: {e:#}"),
                 }
             } else {
                 tracing::warn!("辅助功能未授权，本次降级为仅复制");
@@ -190,13 +205,15 @@ impl Globals {
         }
     }
 
-    /// 唤起面板：清空搜索、刷新最近列表、聚焦搜索框。
+    /// 唤起面板：清空搜索、刷新最近列表、聚焦搜索框、按权限刷新 AX 横幅。
     pub fn show_panel(&self) {
         let Some(p) = self.panel() else {
             return;
         };
         p.reset_input();
         self.refresh_search("");
+        // 每次唤起刷新横幅状态（授权后自动消失）
+        p.set_ax_banner_visible(!paste_back::is_ax_trusted());
         p.show();
     }
 
@@ -365,6 +382,20 @@ define_class!(
             }
         }
 
+        #[unsafe(method(openAccessibilitySettings:))]
+        fn open_accessibility_settings(&self, _sender: Option<&AnyObject>) {
+            // 直达 系统设置 → 隐私与安全性 → 辅助功能
+            let url_str = NSString::from_str(
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            );
+            if let Some(url) = objc2_foundation::NSURL::URLWithString(&url_str) {
+                let opened = NSWorkspace::sharedWorkspace().openURL(&url);
+                tracing::info!("打开系统设置（辅助功能面板）: opened={opened}");
+            } else {
+                tracing::error!("系统设置 URL 构造失败");
+            }
+        }
+
         #[unsafe(method(quitApp:))]
         fn quit_app(&self, _sender: Option<&AnyObject>) {
             NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
@@ -435,9 +466,13 @@ impl AppController {
 pub struct PanelController {
     pub panel: Retained<NSPanel>,
     pub search_field: Retained<NSSearchField>,
+    /// 列表滚动容器（documentView 为 [`Self::list_container`]）。
+    list_scroll: Retained<NSScrollView>,
     pub list_container: Retained<NSView>,
     /// 右栏预览区（分栏布局）。
     pub preview_container: Retained<NSView>,
+    /// AX 未授权横幅（顶部覆盖，默认隐藏）。
+    ax_banner: Retained<NSView>,
     rows: RefCell<Vec<Retained<NSTableCellView>>>,
 }
 
@@ -445,11 +480,11 @@ pub struct PanelController {
 pub type ImageLoader<'a> = &'a dyn Fn(i64) -> Option<Vec<u8>>;
 
 impl PanelController {
-    /// 创建非激活面板（左右分栏：搜索框 + 列表 | 预览区）并挂 window delegate。
+    /// 创建非激活面板（左右分栏：搜索框 + 滚动列表 | 预览区）并挂 window delegate。
     ///
     /// 面板尺寸 `PANEL_WIDTH × (SEARCH_BAR_HEIGHT + rows×ROW_HEIGHT + 16)`，
-    /// 默认 10 行 = 660×376。液态玻璃底由铺满 contentView 的
-    /// [`NSVisualEffectView`] 承担（圆角 12，窗口本体透明）。
+    /// 默认 10 行 = 660×376。真液态玻璃底由铺满 contentView 的
+    /// [`NSGlassEffectView`] 承担（Regular style，圆角 12，窗口本体透明）。
     ///
     /// # Safety
     ///
@@ -484,27 +519,21 @@ impl PanelController {
             panel.setLevel(objc2_app_kit::NSFloatingWindowLevel);
             panel.setReleasedWhenClosed(false);
             panel.setHidesOnDeactivate(false);
-            // 玻璃面板：窗口本体透明，视觉全部由 effect view 承担
+            // 玻璃面板：窗口本体透明，视觉全部由 glass effect view 承担
             panel.setOpaque(false);
             panel.setBackgroundColor(Some(&NSColor::clearColor()));
             panel.setDelegate(Some(ProtocolObject::from_ref(controller)));
 
-            // 液态玻璃底：hudWindow 材质 + behindWindow 混合 + active 态，
-            // layer 圆角 12 + masksToBounds 裁出玻璃圆角
-            let effects = NSVisualEffectView::initWithFrame(
-                NSVisualEffectView::alloc(mtm),
+            // 真液态玻璃底（macOS 26 NSGlassEffectView）：Regular style，
+            // 自带 cornerRadius（无需手动 layer），材质随系统深浅色自适应
+            let glass = NSGlassEffectView::initWithFrame(
+                NSGlassEffectView::alloc(mtm),
                 rect(0.0, 0.0, PANEL_WIDTH, height),
             );
-            effects.setMaterial(NSVisualEffectMaterial::HUDWindow);
-            effects.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-            effects.setState(NSVisualEffectState::Active);
-            effects.setWantsLayer(true);
-            if let Some(layer) = effects.layer() {
-                layer.setCornerRadius(12.0);
-                layer.setMasksToBounds(true);
-            }
+            glass.setStyle(NSGlassEffectViewStyle::Regular);
+            glass.setCornerRadius(12.0);
             if let Some(cv) = panel.contentView() {
-                cv.addSubview(&effects);
+                cv.addSubview(&glass);
             }
 
             // 左栏：搜索框（顶部）
@@ -519,13 +548,21 @@ impl PanelController {
                 cv.addSubview(&search);
             }
 
-            // 左栏：列表容器（其下铺到面板底）
+            // 左栏：列表滚动容器（documentView = list_container，内容自顶部排布）
+            let list_scroll = NSScrollView::initWithFrame(
+                NSScrollView::alloc(mtm),
+                rect(0.0, 0.0, LIST_WIDTH, rows_h + PANEL_PADDING * 2.0),
+            );
+            list_scroll.setHasVerticalScroller(true);
+            list_scroll.setScrollerStyle(NSScrollerStyle::Overlay);
+            list_scroll.setDrawsBackground(false);
             let list = NSView::initWithFrame(
                 NSView::alloc(mtm),
                 rect(0.0, 0.0, LIST_WIDTH, rows_h + PANEL_PADDING * 2.0),
             );
+            list_scroll.setDocumentView(Some(&list));
             if let Some(cv) = panel.contentView() {
-                cv.addSubview(&list);
+                cv.addSubview(&list_scroll);
             }
 
             // 右栏：预览区 + 1pt 竖直分隔线（NSBox separator 随深浅色自适应）
@@ -548,6 +585,39 @@ impl PanelController {
                 cv.addSubview(&separator);
             }
 
+            // AX 未授权横幅：覆盖面板顶部（最后添加 → 最上层），默认隐藏
+            let banner = NSView::initWithFrame(
+                NSView::alloc(mtm),
+                rect(0.0, height - BANNER_HEIGHT, PANEL_WIDTH, BANNER_HEIGHT),
+            );
+            banner.setWantsLayer(true);
+            if let Some(layer) = banner.layer() {
+                let bg = NSColor::separatorColor().colorWithAlphaComponent(0.9);
+                layer.setBackgroundColor(Some(&bg.CGColor()));
+            }
+            let hint = NSTextField::labelWithString(
+                &NSString::from_str("需要辅助功能权限才能自动粘贴"),
+                mtm,
+            );
+            hint.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+            hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            hint.setFrame(rect(12.0, (BANNER_HEIGHT - 14.0) / 2.0, 236.0, 14.0));
+            banner.addSubview(&hint);
+            let open = NSButton::initWithFrame(
+                NSButton::alloc(mtm),
+                rect(PANEL_WIDTH - 124.0, 3.0, 112.0, 22.0),
+            );
+            open.setTitle(&NSString::from_str("打开系统设置"));
+            open.setBezelStyle(NSBezelStyle::Push);
+            let target: &AnyObject = controller;
+            open.setTarget(Some(target));
+            open.setAction(Some(objc2::sel!(openAccessibilitySettings:)));
+            banner.addSubview(&open);
+            banner.setHidden(true);
+            if let Some(cv) = panel.contentView() {
+                cv.addSubview(&banner);
+            }
+
             // field editor：键盘路由核心（安装到 window delegate 的返回值）
             let editor = PanelFieldEditor::new(mtm, runtime);
             controller.ivars().field_editor.borrow_mut().replace(editor);
@@ -555,21 +625,23 @@ impl PanelController {
             PanelController {
                 panel,
                 search_field: search,
+                list_scroll,
                 list_container: list,
                 preview_container: preview,
+                ax_banner: banner,
                 rows: RefCell::new(Vec::new()),
             }
         }
     }
 
-    /// 居中显示 + 搜索框聚焦（焦点直接落在输入框）。
+    /// 屏幕居中显示 + 搜索框聚焦（焦点直接落在输入框）。
     pub fn show(&self) {
         let mtm = MainThreadMarker::new().expect("main thread");
         if let Some(screen) = NSScreen::mainScreen(mtm) {
             let frame = screen.visibleFrame();
             let size = self.panel.frame().size;
             let x = frame.origin.x + (frame.size.width - size.width) / 2.0;
-            let y = frame.origin.y + frame.size.height - size.height - 120.0;
+            let y = frame.origin.y + (frame.size.height - size.height) / 2.0;
             self.panel.setFrame_display(
                 CGRect::new(CGPoint::new(x, y), CGSize::new(size.width, size.height)),
                 false,
@@ -577,6 +649,11 @@ impl PanelController {
         }
         self.panel.makeKeyAndOrderFront(None);
         self.panel.makeFirstResponder(Some(&self.search_field));
+    }
+
+    /// AX 未授权横幅显隐（每次 show_panel 时按最新权限状态刷新）。
+    pub fn set_ax_banner_visible(&self, visible: bool) {
+        self.ax_banner.setHidden(!visible);
     }
 
     pub fn hide(&self) {
@@ -597,7 +674,8 @@ impl PanelController {
         self.panel.makeFirstResponder(Some(&self.search_field));
     }
 
-    /// 全量重建列表行并标注选中行；尾部同步刷新右栏预览。
+    /// 全量重建列表行并标注选中行；内容自顶部排布、选中行滚入可视区；
+    /// 尾部同步刷新右栏预览。
     pub fn update_list(
         &self,
         rows: &[(SearchableItem, Vec<usize>)],
@@ -609,6 +687,12 @@ impl PanelController {
             for old in self.rows.borrow_mut().drain(..) {
                 old.removeFromSuperview();
             }
+            // documentView 高度 = max(实际行数×ROW_HEIGHT, 滚动区高度)：
+            // 行少时短于视口也能从顶部排（非翻转坐标系下短 documentView 会沉底）
+            let area_h = self.list_scroll.frame().size.height;
+            let container_h = (rows.len() as f64 * ROW_HEIGHT).max(area_h);
+            self.list_container
+                .setFrame(rect(0.0, 0.0, LIST_WIDTH, container_h));
             let mut selected_png: Option<Vec<u8>> = None;
             for (i, (item, highlights)) in rows.iter().enumerate() {
                 let png: Option<Vec<u8>> = match item.kind {
@@ -627,10 +711,15 @@ impl PanelController {
                     png.as_deref(),
                     i == selected,
                 );
-                let y = (rows.len() - 1 - i) as f64 * ROW_HEIGHT;
+                // 行 y 从顶部排
+                let y = container_h - (i as f64 + 1.0) * ROW_HEIGHT;
                 row.setFrame(rect(0.0, y, LIST_WIDTH, ROW_HEIGHT));
                 self.list_container.addSubview(&row);
                 self.rows.borrow_mut().push(row);
+            }
+            // 键盘导航跟随：选中行滚入可视区（行少时无可滚区域，自然 no-op）
+            if let Some(sel) = self.rows.borrow().get(selected) {
+                let _: bool = sel.scrollRectToVisible(sel.bounds());
             }
             // 预览区跟随当前选中行（空列表/越界 → 占位提示）
             match rows.get(selected) {
