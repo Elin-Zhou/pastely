@@ -5,7 +5,7 @@ use objc2::AnyThread;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSColor, NSFont, NSImage, NSImageView,
-    NSLineBreakMode, NSTableCellView, NSTextAlignment, NSTextField,
+    NSLineBreakMode, NSTableCellView, NSTextField,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSMutableAttributedString, NSString};
@@ -19,9 +19,8 @@ pub const THUMB_SIZE: f64 = 28.0;
 /// 时间列宽（pt）。
 pub const META_WIDTH: f64 = 72.0;
 /// 行首序号徽章宽度（pt）。
-pub const BADGE_WIDTH: f64 = 18.0;
 /// 内容区（文本/缩略图）起始 x（徽章 6 + 18 + 2 间隙）。
-pub const CONTENT_X: f64 = 26.0;
+pub const CONTENT_X: f64 = 8.0;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
@@ -92,7 +91,7 @@ pub unsafe fn highlighted_preview(
     }
 }
 
-/// 构造一行 view-based 单元格（左栏 320pt 宽；`index` 用于行首序号徽章）。
+/// 构造一行 view-based 单元格（左栏 320pt 宽）。
 ///
 /// # Safety
 ///
@@ -100,7 +99,6 @@ pub unsafe fn highlighted_preview(
 pub unsafe fn build_row(
     mtm: MainThreadMarker,
     view_width: f64,
-    index: usize,
     item: &SearchableItem,
     char_indices: &[usize],
     png_bytes: Option<&[u8]>,
@@ -108,19 +106,6 @@ pub unsafe fn build_row(
 ) -> Retained<NSTableCellView> {
     unsafe {
         let cell = NSTableCellView::new(mtm);
-
-        // 行首序号徽章：1-9 数字（⌘N 直达的视觉对应），第 10 行及以后为空
-        let badge_text: String = if index < 9 {
-            (index + 1).to_string()
-        } else {
-            String::new()
-        };
-        let badge = NSTextField::labelWithString(&NSString::from_str(&badge_text), mtm);
-        badge.setFont(Some(&NSFont::systemFontOfSize(10.0)));
-        badge.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        badge.setAlignment(NSTextAlignment::Center);
-        badge.setFrame(rect(6.0, (ROW_HEIGHT - 14.0) / 2.0, BADGE_WIDTH, 14.0));
-        cell.addSubview(&badge);
 
         // 行级选中高亮（Text/Image 统一：cell layer 背景，图片行同样有反馈）
         if selected {

@@ -101,7 +101,6 @@ fn main() -> anyhow::Result<()> {
             g: globals,
             filtered: Vec::new(),
             selected: 0,
-            query: String::new(),
         }));
         *globals.runtime.borrow_mut() = Some(runtime as *mut PanelRuntime);
 

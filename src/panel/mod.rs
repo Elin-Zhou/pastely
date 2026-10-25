@@ -103,7 +103,6 @@ impl Globals {
         let Some(rt) = self.runtime() else {
             return;
         };
-        rt.query = query.to_string();
         let items = {
             let store = self.store.lock().expect("store poisoned");
             store.all_searchable().unwrap_or_default()
@@ -264,8 +263,6 @@ pub struct PanelRuntime {
     pub g: *const Globals,
     pub filtered: Vec<(SearchableItem, Vec<usize>)>,
     pub selected: usize,
-    /// 当前搜索词（非空时数字键 1-9 透传给输入，不做行直达）。
-    pub query: String,
 }
 
 impl PanelRuntime {
@@ -815,7 +812,6 @@ impl PanelController {
                 let row = build_row(
                     mtm,
                     LIST_WIDTH,
-                    i,
                     item,
                     highlights,
                     png.as_deref(),

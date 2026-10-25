@@ -18,8 +18,6 @@ const K_DOWN: u16 = 125;
 const K_RETURN: u16 = 36;
 const K_ENTER: u16 = 76;
 const K_ESCAPE: u16 = 53;
-const K_NUM_1: u16 = 18;
-const K_NUM_9: u16 = 26;
 const K_COMMA: u16 = 43;
 
 define_class!(
@@ -53,14 +51,6 @@ define_class!(
                         None,
                     )
                 };
-                return;
-            }
-            // 数字键直达：顶部数字 1-9 确认对应行——仅当搜索词为空
-            // （有查询词时用户是在"搜索"数字，透传给输入框）；越界/空列表也透传
-            if (K_NUM_1..=K_NUM_9).contains(&key)
-                && runtime.query.is_empty()
-                && runtime.confirm_at((key - K_NUM_1) as usize)
-            {
                 return;
             }
             match key {
