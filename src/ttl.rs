@@ -47,12 +47,12 @@ mod tests {
         let store = ClipStore::open_in_memory().unwrap();
         let now = now_ms();
         // 过期非置顶：TTL 清 1
-        store.upsert(&text_item("expired", now - 2 * DAY_MS)).unwrap();
+        store
+            .upsert(&text_item("expired", now - 2 * DAY_MS))
+            .unwrap();
         // 4 条新鲜记录，max_items=3：TTL 后剩 4 → 容量再淘汰最旧 1 条
         for i in 0..4 {
-            store
-                .upsert(&text_item(&format!("f{i}"), now + i))
-                .unwrap();
+            store.upsert(&text_item(&format!("f{i}"), now + i)).unwrap();
         }
         let (expired, evicted) = reap_once(&store, 1, 3).unwrap();
         assert_eq!((expired, evicted), (1, 1));
