@@ -23,10 +23,11 @@ use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::MainThreadOnly;
 use objc2::{DefinedClass, MainThreadMarker};
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSBackingStoreType, NSColor, NSControlTextEditingDelegate, NSMenu, NSMenuItem, NSPanel,
-    NSScreen, NSSearchField, NSStatusBar, NSTableCellView, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask, NSWorkspace,
+    NSAlert, NSAlertSecondButtonReturn, NSApplication, NSApplicationActivationPolicy,
+    NSApplicationDelegate, NSBackingStoreType, NSColor, NSControlTextEditingDelegate, NSMenu,
+    NSMenuItem, NSPanel, NSScreen, NSSearchField, NSSearchFieldDelegate, NSStatusBar,
+    NSTableCellView, NSTextFieldDelegate, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSNotification, NSObjectProtocol, NSString};
@@ -47,6 +48,10 @@ pub const PANEL_WIDTH: f64 = 680.0;
 pub const SEARCH_BAR_HEIGHT: f64 = 44.0;
 /// 上下边距（pt）。
 pub const PANEL_PADDING: f64 = 8.0;
+
+/// `NSStatusItemVariableLength`（AppKit 语义：状态栏 item 宽度随内容自适应）。
+/// objc2-app-kit 0.3.2 未导出该常量，按 Apple 文档取值 -1.0。
+const NS_STATUS_ITEM_VARIABLE_LENGTH: f64 = -1.0;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
@@ -85,6 +90,7 @@ impl Globals {
             store.all_searchable().unwrap_or_default()
         };
         rt.filtered = fuzzy_filter(&items, query);
+        rt.filtered.truncate(self.config.ui.max_list_rows);
         rt.selected = 0;
         if let Some(p) = self.panel() {
             p.update_list(&rt.filtered, rt.selected, &|id| {
@@ -199,15 +205,15 @@ impl PanelRuntime {
         unsafe { &*self.g }
     }
 
-    pub fn move_selection(&mut self, delta: i32) {
+    pub fn move_selection(&self, delta: i32) {
         self.globals().move_selection(delta);
     }
 
-    pub fn confirm_current(&mut self) {
+    pub fn confirm_current(&self) {
         self.globals().confirm();
     }
 
-    pub fn hide(&mut self) {
+    pub fn hide(&self) {
         self.globals().hide_panel();
     }
 }
@@ -313,7 +319,7 @@ define_class!(
                 ));
                 alert.addButtonWithTitle(&NSString::from_str("取消"));
                 alert.addButtonWithTitle(&NSString::from_str("清空"));
-                if alert.runModal() == 1001 {
+                if alert.runModal() == NSAlertSecondButtonReturn {
                     g.store.lock().expect("store poisoned").clear().ok();
                     g.refresh_search("");
                     tracing::info!("已清空历史");
@@ -373,6 +379,13 @@ define_class!(
             }
         }
     }
+
+    // 搜索框 delegate（NSSearchField::setDelegate）要求协议链
+    // NSControlTextEditingDelegate → NSTextFieldDelegate → NSSearchFieldDelegate 全部声明；
+    // 三个协议的方法均为 @optional，实际只需上方已实现的 controlTextDidChange:。
+    unsafe impl NSTextFieldDelegate for AppController {}
+
+    unsafe impl NSSearchFieldDelegate for AppController {}
 );
 
 impl AppControllerIvars {
@@ -453,6 +466,8 @@ impl PanelController {
                 ),
             );
             search.setPlaceholderString(Some(&NSString::from_str("搜索剪切板历史…")));
+            // 关键：delegate 指向 AppController，输入变化才会触发 controlTextDidChange:
+            search.setDelegate(Some(ProtocolObject::from_ref(controller)));
             if let Some(cv) = panel.contentView() {
                 cv.addSubview(&search);
             }
@@ -555,7 +570,8 @@ impl PanelController {
 pub unsafe fn build_status_bar() {
     unsafe {
         let mtm = MainThreadMarker::new().expect("main thread");
-        let item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
+        let item =
+            NSStatusBar::systemStatusBar().statusItemWithLength(NS_STATUS_ITEM_VARIABLE_LENGTH);
         if let Some(button) = item.button(mtm) {
             button.setTitle(&NSString::from_str("📋"));
         }

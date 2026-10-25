@@ -8,7 +8,7 @@ use objc2::define_class;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSEvent, NSTextView};
+use objc2_app_kit::{NSEvent, NSTextInputClient, NSTextView};
 
 use super::PanelRuntime;
 
@@ -31,7 +31,15 @@ define_class!(
         #[unsafe(method(keyDown:))]
         unsafe fn key_down(&self, event: &NSEvent) {
             let key = event.keyCode();
-            let runtime: &mut PanelRuntime = unsafe { &mut *(*self.ivars()) };
+            // IME 组合中（存在 marked text）：全部按键原样交回系统 field editor，
+            // 否则会吞掉候选窗的确认/翻页等组合键
+            if self.hasMarkedText() {
+                let _: () = unsafe { msg_send![super(self), keyDown: event] };
+                return;
+            }
+            // SAFETY: 共享引用即可（方法全部走 &self），避免与 Globals::runtime()
+            // 重新派生的 &mut PanelRuntime 构成双重可变别名
+            let runtime: &PanelRuntime = unsafe { &*(*self.ivars()) };
             match key {
                 K_UP => runtime.move_selection(-1),
                 K_DOWN => runtime.move_selection(1),
