@@ -27,7 +27,7 @@ impl ClipKind {
 }
 
 /// 写入载荷（clipboard → store）。`hash` 为内容 SHA-256 前 16 字节 hex（32 字符）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewClipItem {
     pub kind: ClipKind,
     /// kind=Text 时必有
