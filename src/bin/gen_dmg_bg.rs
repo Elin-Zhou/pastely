@@ -229,10 +229,10 @@ fn render(out: &str, _mtm: MainThreadMarker) {
     // 白色剪贴板水印
     draw_clipboard(LEFT_W / 2.0, H / 2.0, 300.0);
     // 右缘分隔线（白 alpha 0.25）
-    fill_rect(LEFT_W - 2.0, 0.0, 2.0, H, &srgb(255.0, 255.0, 255.0, 0.25));
+    fill_rect(LEFT_W - 2.0, 0.0, 2.0, H, &srgb(0.0, 0.0, 0.0, 0.12));
 
     // —— 右区：#1A1A1E 底 ——
-    fill_rect(LEFT_W, 0.0, W - LEFT_W, H, &srgb(26.0, 26.0, 30.0, 1.0));
+    fill_rect(LEFT_W, 0.0, W - LEFT_W, H, &srgb(245.0, 245.0, 247.0, 1.0));
 
     // 标题：顶部 y=64（自上而下）→ 底左 y = H-64-68
     draw_text(
@@ -241,7 +241,7 @@ fn render(out: &str, _mtm: MainThreadMarker) {
         H - 64.0 - 68.0,
         56.0,
         TextKind::Bold,
-        &srgb(255.0, 255.0, 255.0, 1.0),
+        &srgb(29.0, 29.0, 31.0, 1.0),
     );
     // 强调线：标题下 24pt，220×3，紫
     fill_rect(
@@ -258,7 +258,7 @@ fn render(out: &str, _mtm: MainThreadMarker) {
         H - 175.0 - 20.0,
         18.0,
         TextKind::Mono,
-        &srgb(178.0, 178.0, 186.0, 1.0),
+        &srgb(110.0, 110.0, 115.0, 1.0),
     );
 
     // —— 拖装区中带：图标 96pt 中心 (480/680, 300)，箭头 (545..618, 300) ——
@@ -278,7 +278,7 @@ fn render(out: &str, _mtm: MainThreadMarker) {
         H - 495.0 - 17.0,
         15.0,
         TextKind::Mono,
-        &srgb(150.0, 150.0, 158.0, 1.0),
+        &srgb(134.0, 134.0, 139.0, 1.0),
     );
 
     NSGraphicsContext::setCurrentContext(None);

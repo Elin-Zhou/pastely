@@ -102,6 +102,7 @@ osascript <<APPLESCRIPT || echo "警告：Finder 布局失败，退化为普通 
 tell application "Finder"
   tell disk "$TEMP_VOL"
     open
+    delay 2
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
@@ -110,9 +111,18 @@ tell application "Finder"
     set arrangement of viewOptions to not arranged
     set icon size of viewOptions to 96
     set text size of viewOptions to 15
+    set label position of viewOptions to bottom
     set background picture of viewOptions to file ".background:background.tiff"
-    set position of item "$APP_NAME.app" of container window to {432, 252}
-    set position of item "Applications" of container window to {632, 252}
+    -- position 在窗口完成加载后设置才可靠；连续设置两次是社区针对失效的标准做法
+    delay 1
+    set position of item "$APP_NAME.app" of container window to {432, 274}
+    set position of item "Applications" of container window to {632, 274}
+    delay 1
+    set position of item "$APP_NAME.app" of container window to {432, 274}
+    set position of item "Applications" of container window to {632, 274}
+    close
+    delay 1
+    open
     update without registering applications
   end tell
 end tell
