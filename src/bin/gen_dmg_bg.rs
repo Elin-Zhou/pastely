@@ -262,36 +262,21 @@ fn render(out: &str, _mtm: MainThreadMarker) {
         &srgb(152.0, 152.0, 159.0, 1.0),
     );
 
-    // —— 拖装区中带：图标 96pt 中心 (505/695, 305)，箭头 (565..635, 305) ——
+    // —— 拖装区中带：图标 96pt 中心 (480/680, 300)，箭头 (545..618, 300) ——
+    // 名称标签不用背景图绘制：Finder 原生标签是矢量渲染（Retina 清晰），
+    // 背景图 1px=1pt 必然柔化，中等字号文字最暴露——只保留大标题/大水印。
     let white_guide = srgb(255.0, 255.0, 255.0, 0.75);
     // 横线 → 空心圆圈 → 箭头头部
-    stroke_line(565.0, 305.0, 602.0, 305.0, 3.0, &white_guide);
-    stroke_circle(614.0, 305.0, 10.0, 3.0, &white_guide);
-    stroke_line(628.0, 298.0, 636.0, 305.0, 3.0, &white_guide);
-    stroke_line(628.0, 312.0, 636.0, 305.0, 3.0, &white_guide);
-    // 名称标签（图标下方，水平居中各自图标中心；顶 375 自上而下）
-    draw_text_centered(
-        "Pastely",
-        505.0,
-        H - 400.0,
-        17.0,
-        TextKind::Semibold,
-        &srgb(255.0, 255.0, 255.0, 0.92),
-    );
-    draw_text_centered(
-        "Applications",
-        695.0,
-        H - 400.0,
-        17.0,
-        TextKind::Semibold,
-        &srgb(255.0, 255.0, 255.0, 0.92),
-    );
+    stroke_line(545.0, 300.0, 585.0, 300.0, 3.0, &white_guide);
+    stroke_circle(597.0, 300.0, 10.0, 3.0, &white_guide);
+    stroke_line(611.0, 293.0, 619.0, 300.0, 3.0, &white_guide);
+    stroke_line(611.0, 307.0, 619.0, 300.0, 3.0, &white_guide);
 
-    // 底部拖装提示：y≈515（自上而下）；缩短字串避免窄窗口溢出
+    // 底部拖装提示：y≈500（自上而下），底距 44pt 防裁切
     draw_text(
         "D R A G   T O   A P P L I C A T I O N S",
         LEFT_W + 80.0,
-        H - 515.0 - 16.0,
+        H - 500.0 - 16.0,
         13.0,
         TextKind::Mono,
         &srgb(124.0, 124.0, 133.0, 1.0),

@@ -7,7 +7,7 @@
 use objc2::define_class;
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSBackingStoreType, NSBeep, NSBezelStyle, NSButton, NSButtonType,
     NSColor, NSEvent, NSEventModifierFlags, NSFont, NSGlassEffectView, NSGlassEffectViewStyle,
@@ -21,7 +21,7 @@ use crate::config::{Config, PasteMode};
 
 /// 窗口尺寸。
 pub const SETTINGS_WIDTH: f64 = 400.0;
-pub const SETTINGS_HEIGHT: f64 = 412.0;
+pub const SETTINGS_HEIGHT: f64 = 470.0;
 /// 顶部内缩：FullSizeContentView 下红绿灯画在内容区左上，表单整体下移避开。
 const TOP_INSET: f64 = 36.0;
 
@@ -42,8 +42,12 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
 }
 
-/// 快捷键录制框的 ivars（无状态：捕获结果直接写自身 stringValue）。
-pub struct HotkeyRecorderIvars;
+/// 快捷键录制框的 ivars（录制状态 + Globals 指针供 suspend/resume）。
+pub struct HotkeyRecorderIvars {
+    /// 进入录制前的原值（None = 未在录制）。
+    saved: std::cell::RefCell<Option<String>>,
+    globals: *const super::Globals,
+}
 
 define_class!(
     // SAFETY: NSTextField 无子类化约束；本类型不实现 Drop。
@@ -60,12 +64,30 @@ define_class!(
             true
         }
 
-        /// 点击进入录制（取得焦点）。
+        /// 点击进入录制：保存原值、显示提示态、暂停全局快捷键。
         #[unsafe(method(mouseDown:))]
         unsafe fn mouse_down(&self, _event: &NSEvent) {
+            if self.ivars().saved.borrow().is_some() {
+                return; // 已在录制
+            }
+            *self.ivars().saved.borrow_mut() = Some(self.stringValue().to_string());
+            self.setStringValue(&NSString::from_str(""));
+            self.setPlaceholderString(Some(&NSString::from_str("按下快捷键…")));
+            let globals = unsafe { &*self.ivars().globals };
+            if let Err(e) = globals.hotkey.borrow_mut().suspend() {
+                tracing::warn!("暂停全局快捷键失败: {e:#}");
+            }
             if let Some(w) = self.window() {
                 w.makeFirstResponder(Some(self));
             }
+        }
+
+        /// 失焦（捕获成功退出 / 点击别处 / 关窗）：恢复原值并恢复全局快捷键。
+        #[unsafe(method(resignFirstResponder))]
+        unsafe fn resign_first_responder(&self) -> bool {
+            self.finish_recording();
+            let resumed: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            resumed
         }
 
         /// 捕获按键：修饰键 + 主键（字母/数字/F1-F12）合成 "Ctrl+Cmd+V" 风格字符串。
@@ -93,7 +115,10 @@ define_class!(
             match vk_to_key_name(event.keyCode(), &chars) {
                 Some(name) if !parts.is_empty() => {
                     parts.push(name);
-                    self.setStringValue(&NSString::from_str(&parts.join("+")));
+                    let joined = parts.join("+");
+                    // 先记为新值再退焦：resign 恢复的就是捕获结果
+                    *self.ivars().saved.borrow_mut() = Some(joined.clone());
+                    self.setStringValue(&NSString::from_str(&joined));
                     // 退出录制，焦点还给窗口
                     if let Some(w) = self.window() {
                         w.makeFirstResponder(None);
@@ -106,6 +131,20 @@ define_class!(
         }
     }
 );
+
+impl HotkeyRecorderField {
+    /// 结束录制：恢复原值/捕获值 + 恢复全局快捷键（幂等；未在录制时为 no-op）。
+    pub(crate) fn finish_recording(&self) {
+        if let Some(saved) = self.ivars().saved.borrow_mut().take() {
+            self.setStringValue(&NSString::from_str(&saved));
+            self.setPlaceholderString(Some(&NSString::from_str("点击后按组合键录制")));
+            let globals = unsafe { &*self.ivars().globals };
+            if let Err(e) = globals.hotkey.borrow_mut().resume() {
+                tracing::warn!("恢复全局快捷键失败: {e:#}");
+            }
+        }
+    }
+}
 
 /// 硬件 keyCode（+ 主键字符）→ `parse_hotkey` 兼容的主键名。
 /// 仅支持字母 / 数字 / F1-F12（与 parse_hotkey 支持集一致）；其余 `None`。
@@ -140,6 +179,8 @@ fn vk_to_key_name(key_code: u16, chars: &str) -> Option<String> {
 pub struct SettingsWindow {
     pub window: Retained<NSWindow>,
     launch_btn: Retained<NSButton>,
+    ax_status: Retained<NSTextField>,
+    ax_open_btn: Retained<NSButton>,
     hotkey_field: Retained<HotkeyRecorderField>,
     ttl_field: Retained<NSTextField>,
     capacity_field: Retained<NSTextField>,
@@ -186,6 +227,7 @@ impl SettingsWindow {
             });
         self.rows_field
             .setStringValue(&NSString::from_str(&config.ui.max_list_rows.to_string()));
+        self.set_ax_status(super::paste_back::is_ax_trusted());
     }
 
     // —— 保存时读值（AppController::saveSettings: 调用）——
@@ -229,6 +271,26 @@ impl SettingsWindow {
     pub(crate) fn order_out(&self) {
         self.window.orderOut(None);
     }
+
+    /// 结束录制（取消/关窗/保存前调用，恢复全局快捷键）。
+    pub(crate) fn finish_recording(&self) {
+        self.hotkey_field.finish_recording();
+    }
+
+    /// 刷新授权状态行（refill 与重新授权后调用）。
+    pub(crate) fn set_ax_status(&self, trusted: bool) {
+        self.ax_status.setStringValue(&NSString::from_str(if trusted {
+            "已授权 ✓"
+        } else {
+            "未授权"
+        }));
+        self.ax_status.setTextColor(Some(if trusted {
+            &NSColor::labelColor()
+        } else {
+            &NSColor::systemOrangeColor()
+        }));
+        self.ax_open_btn.setHidden(trusted);
+    }
 }
 
 /// 打开设置窗口（单例复用；每次打开回填当前配置）。
@@ -242,7 +304,7 @@ pub fn show(globals: &'static super::Globals, controller: &AppController) {
         w.window.makeKeyAndOrderFront(None);
         return;
     }
-    let w = unsafe { build(mtm, controller) };
+    let w = unsafe { build(mtm, controller, globals) };
     w.refill(&globals.config.borrow());
     w.window.center();
     w.window.makeKeyAndOrderFront(None);
@@ -268,6 +330,7 @@ pub fn save(globals: &'static super::Globals) {
     let Some(w) = *globals.settings.borrow() else {
         return;
     };
+    w.finish_recording();
 
     // —— 校验（任一失败弹窗且不关窗）——
     let hotkey = w.hotkey_string();
@@ -364,7 +427,17 @@ pub fn save(globals: &'static super::Globals) {
 /// 关闭设置窗口（取消 / Esc）。
 pub fn close(globals: &'static super::Globals) {
     if let Some(w) = *globals.settings.borrow() {
+        w.finish_recording();
         w.order_out();
+    }
+}
+
+/// 「重新授权」：弹系统授权框（prompt 版），完成后刷新状态行。
+pub fn request_permission(globals: &'static super::Globals) {
+    if let Some(w) = *globals.settings.borrow() {
+        let trusted = super::paste_back::request_ax_permission();
+        w.set_ax_status(trusted);
+        tracing::info!("重新授权完成：trusted={trusted}");
     }
 }
 
@@ -373,7 +446,11 @@ pub fn close(globals: &'static super::Globals) {
 /// # Safety
 ///
 /// 必须在主线程调用（mtm 保证）。
-unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWindow {
+unsafe fn build(
+    mtm: MainThreadMarker,
+    controller: &AppController,
+    globals: &'static super::Globals,
+) -> SettingsWindow {
     unsafe {
         let content = rect(0.0, 0.0, SETTINGS_WIDTH, SETTINGS_HEIGHT);
         let mask = NSWindowStyleMask::Titled
@@ -441,10 +518,14 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
         launch_btn.setTitle(&NSString::from_str(""));
         launch_btn.setButtonType(NSButtonType::Switch);
         // 1. 快捷键（录制控件：点击后按组合键捕获）
-        let hotkey_alloc = HotkeyRecorderField::alloc(mtm).set_ivars(HotkeyRecorderIvars);
+        let hotkey_alloc = HotkeyRecorderField::alloc(mtm)
+            .set_ivars(HotkeyRecorderIvars {
+                saved: std::cell::RefCell::new(None),
+                globals: globals as *const super::Globals,
+            });
         let hotkey_field: Retained<HotkeyRecorderField> = msg_send![super(hotkey_alloc), initWithFrame: rect(
             158.0,
-            row_y(0),
+            row_y(1),
             226.0,
             24.0
         )];
@@ -468,6 +549,33 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
             n.setFrame(rect(246.0, row_y(6) + 5.0, 138.0, 14.0));
             n
         };
+
+        // 7. 自动粘贴授权：状态文本 + 重新授权 + 打开系统设置（未授权时显示）
+        let ax_status = {
+            let l = NSTextField::labelWithString(&NSString::from_str("未授权"), mtm);
+            l.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+            l.setFrame(rect(158.0, row_y(7) + 5.0, 66.0, 14.0));
+            l
+        };
+        let ax_request_btn = NSButton::initWithFrame(
+            NSButton::alloc(mtm),
+            rect(230.0, row_y(7), 62.0, 22.0),
+        );
+        ax_request_btn.setTitle(&NSString::from_str("重新授权"));
+        ax_request_btn.setBezelStyle(NSBezelStyle::Push);
+        ax_request_btn.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        let target: &objc2::runtime::AnyObject = controller;
+        ax_request_btn.setTarget(Some(target));
+        ax_request_btn.setAction(Some(objc2::sel!(requestAxPermission:)));
+        let ax_open_btn = NSButton::initWithFrame(
+            NSButton::alloc(mtm),
+            rect(296.0, row_y(7), 88.0, 22.0),
+        );
+        ax_open_btn.setTitle(&NSString::from_str("打开系统设置"));
+        ax_open_btn.setBezelStyle(NSBezelStyle::Push);
+        ax_open_btn.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        ax_open_btn.setTarget(Some(target));
+        ax_open_btn.setAction(Some(objc2::sel!(openAccessibilitySettings:)));
 
         // 底部按钮：保存（默认高亮，回车）/ 取消（Esc）
         let target: &objc2::runtime::AnyObject = controller;
@@ -516,6 +624,7 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
             ("粘贴模式", row_y(4)),
             ("主题", row_y(5)),
             ("列表行数", row_y(6)),
+            ("自动粘贴授权", row_y(7)),
         ] {
             let l = label(text, y);
             form.addSubview(&l);
@@ -528,6 +637,9 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
         form.addSubview(&theme_popup);
         form.addSubview(&rows_field);
         form.addSubview(&rows_note);
+        form.addSubview(&ax_status);
+        form.addSubview(&ax_request_btn);
+        form.addSubview(&ax_open_btn);
         form.addSubview(&ax_note);
         form.addSubview(&save_btn);
         form.addSubview(&cancel_btn);
@@ -535,6 +647,8 @@ unsafe fn build(mtm: MainThreadMarker, controller: &AppController) -> SettingsWi
         SettingsWindow {
             window,
             launch_btn,
+            ax_status,
+            ax_open_btn,
             hotkey_field,
             ttl_field,
             capacity_field,
