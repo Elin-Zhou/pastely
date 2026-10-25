@@ -74,17 +74,11 @@ fn fill_rounded(x: f64, y: f64, w: f64, h: f64, radius: f64, color: &NSColor) {
 fn stroke_line(x0: f64, y0: f64, x1: f64, y1: f64, width: f64, color: &NSColor) {
     let path = NSBezierPath::bezierPath();
     path.setLineWidth(s(width));
-    unsafe {
-        path.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
-    }
+    path.setLineCapStyle(objc2_app_kit::NSLineCapStyle::Round);
     path.moveToPoint(CGPoint::new(s(x0), s(y0)));
     path.lineToPoint(CGPoint::new(s(x1), s(y1)));
     color.setStroke();
     path.stroke();
-}
-
-fn stroke_circle(cx: f64, cy: f64, r: f64, width: f64, color: &NSColor) {
-    stroke_rounded(cx - r, cy - r, 2.0 * r, 2.0 * r, r, width, color);
 }
 
 /// 白色剪贴板水印（板身描边 + 顶部夹子 + 三条内容线），居中于 (cx, cy)。
@@ -188,10 +182,7 @@ fn main() {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "dmg_bg.png".to_string());
-    let scale_factor: f64 = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1.0);
+    let scale_factor: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1.0);
     unsafe {
         SCALE = scale_factor;
     }
@@ -261,12 +252,10 @@ fn render(out: &str, _mtm: MainThreadMarker) {
     let guide = srgb(60.0, 60.0, 67.0, 0.9);
     stroke_line(500.0, 285.0, 612.0, 285.0, 3.0, &guide);
     let head = NSBezierPath::bezierPath();
-    unsafe {
-        head.moveToPoint(CGPoint::new(s(612.0), s(276.0)));
-        head.lineToPoint(CGPoint::new(s(634.0), s(285.0)));
-        head.lineToPoint(CGPoint::new(s(612.0), s(294.0)));
-        head.closePath();
-    }
+    head.moveToPoint(CGPoint::new(s(612.0), s(276.0)));
+    head.lineToPoint(CGPoint::new(s(634.0), s(285.0)));
+    head.lineToPoint(CGPoint::new(s(612.0), s(294.0)));
+    head.closePath();
     guide.setFill();
     head.fill();
 
