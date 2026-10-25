@@ -252,9 +252,14 @@ fn render(out: &str, _mtm: MainThreadMarker) {
         &srgb(168.0, 85.0, 247.0, 1.0),
     );
 
-    // 拖装区中带：图标 96pt 中心 (480/680, 300)。箭头已移除——
-    // 其与图标的对齐依赖 Finder position 语义，任何环境差异都会错位；
-    // 拖拽引导由底部 DRAG TO APPLICATIONS 文字承担。
+    // 拖装指引箭头：位置由真实渲染像素测量校准——
+    // Pastely 图标视觉中心 (470,263)、Applications (632,306)，取均值 y=285；
+    // Applications 右移至 x=700 后间隙拉宽，箭头 x 545..634；深灰 0.9 保证浅底可见
+    let guide = srgb(60.0, 60.0, 67.0, 0.9);
+    stroke_line(545.0, 285.0, 602.0, 285.0, 3.5, &guide);
+    stroke_circle(613.0, 285.0, 7.0, 3.5, &guide);
+    stroke_line(624.0, 278.0, 634.0, 285.0, 3.5, &guide);
+    stroke_line(624.0, 292.0, 634.0, 285.0, 3.5, &guide);
 
     // 底部拖装提示：y≈500（自上而下），底距 44pt 防裁切
     draw_text(

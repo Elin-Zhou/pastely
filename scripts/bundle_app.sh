@@ -116,10 +116,10 @@ tell application "Finder"
     -- position 在窗口完成加载后设置才可靠；连续设置两次是社区针对失效的标准做法
     delay 1
     set position of item "$APP_NAME.app" of container window to {432, 274}
-    set position of item "Applications" of container window to {632, 274}
+    set position of item "Applications" of container window to {700, 274}
     delay 1
     set position of item "$APP_NAME.app" of container window to {432, 274}
-    set position of item "Applications" of container window to {632, 274}
+    set position of item "Applications" of container window to {700, 274}
     close
     delay 1
     open
