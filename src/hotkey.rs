@@ -148,6 +148,27 @@ impl HotkeyManager {
         Ok(hotkey.id())
     }
 
+    /// 暂停全部已注册快捷键（录制期间防冲突）：unregister 但**保留 registered 列表**，
+    /// [`Self::resume`] 按原列表恢复。register/poll 语义不变。
+    pub fn suspend(&mut self) -> anyhow::Result<()> {
+        if self.registered.is_empty() {
+            return Ok(());
+        }
+        self.manager
+            .unregister_all(&self.registered)
+            .map_err(|e| anyhow::anyhow!("unregister hotkeys: {e}"))
+    }
+
+    /// 恢复 suspend 暂停的快捷键（按 registered 列表重新 register）。
+    pub fn resume(&mut self) -> anyhow::Result<()> {
+        for hotkey in self.registered.clone() {
+            self.manager
+                .register(hotkey)
+                .map_err(|e| anyhow::anyhow!("register hotkey: {e}"))?;
+        }
+        Ok(())
+    }
+
     /// 取尽事件队列，返回被**按下**（Pressed）的热键 id 列表。
     /// macOS 后端对一次物理按压会同时送出 Pressed/Released，这里只上报 Pressed，
     /// 避免上层同一按压触发两次。
