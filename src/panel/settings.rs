@@ -279,16 +279,18 @@ impl SettingsWindow {
 
     /// 刷新授权状态行（refill 与重新授权后调用）。
     pub(crate) fn set_ax_status(&self, trusted: bool) {
-        self.ax_status.setStringValue(&NSString::from_str(if trusted {
-            "已授权 ✓"
+        self.ax_status
+            .setStringValue(&NSString::from_str(if trusted {
+                "已授权 ✓"
+            } else {
+                "未授权"
+            }));
+        let color = if trusted {
+            NSColor::labelColor()
         } else {
-            "未授权"
-        }));
-        self.ax_status.setTextColor(Some(if trusted {
-            &NSColor::labelColor()
-        } else {
-            &NSColor::systemOrangeColor()
-        }));
+            NSColor::systemOrangeColor()
+        };
+        self.ax_status.setTextColor(Some(&color));
         self.ax_open_btn.setHidden(trusted);
     }
 }
@@ -518,11 +520,10 @@ unsafe fn build(
         launch_btn.setTitle(&NSString::from_str(""));
         launch_btn.setButtonType(NSButtonType::Switch);
         // 1. 快捷键（录制控件：点击后按组合键捕获）
-        let hotkey_alloc = HotkeyRecorderField::alloc(mtm)
-            .set_ivars(HotkeyRecorderIvars {
-                saved: std::cell::RefCell::new(None),
-                globals: globals as *const super::Globals,
-            });
+        let hotkey_alloc = HotkeyRecorderField::alloc(mtm).set_ivars(HotkeyRecorderIvars {
+            saved: std::cell::RefCell::new(None),
+            globals: globals as *const super::Globals,
+        });
         let hotkey_field: Retained<HotkeyRecorderField> = msg_send![super(hotkey_alloc), initWithFrame: rect(
             158.0,
             row_y(1),
@@ -557,20 +558,16 @@ unsafe fn build(
             l.setFrame(rect(158.0, row_y(7) + 5.0, 66.0, 14.0));
             l
         };
-        let ax_request_btn = NSButton::initWithFrame(
-            NSButton::alloc(mtm),
-            rect(230.0, row_y(7), 62.0, 22.0),
-        );
+        let ax_request_btn =
+            NSButton::initWithFrame(NSButton::alloc(mtm), rect(230.0, row_y(7), 62.0, 22.0));
         ax_request_btn.setTitle(&NSString::from_str("重新授权"));
         ax_request_btn.setBezelStyle(NSBezelStyle::Push);
         ax_request_btn.setFont(Some(&NSFont::systemFontOfSize(11.0)));
         let target: &objc2::runtime::AnyObject = controller;
         ax_request_btn.setTarget(Some(target));
         ax_request_btn.setAction(Some(objc2::sel!(requestAxPermission:)));
-        let ax_open_btn = NSButton::initWithFrame(
-            NSButton::alloc(mtm),
-            rect(296.0, row_y(7), 88.0, 22.0),
-        );
+        let ax_open_btn =
+            NSButton::initWithFrame(NSButton::alloc(mtm), rect(296.0, row_y(7), 88.0, 22.0));
         ax_open_btn.setTitle(&NSString::from_str("打开系统设置"));
         ax_open_btn.setBezelStyle(NSBezelStyle::Push);
         ax_open_btn.setFont(Some(&NSFont::systemFontOfSize(11.0)));

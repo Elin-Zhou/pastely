@@ -424,6 +424,11 @@ define_class!(
             }
         }
 
+        #[unsafe(method(requestAxPermission:))]
+        fn request_ax_permission(&self, _sender: Option<&AnyObject>) {
+            settings::request_permission(self.ivars().globals());
+        }
+
         #[unsafe(method(openAccessibilitySettings:))]
         fn open_accessibility_settings(&self, _sender: Option<&AnyObject>) {
             // 直达 系统设置 → 隐私与安全性 → 辅助功能

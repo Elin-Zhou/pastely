@@ -155,8 +155,6 @@ enum TextKind {
     Bold,
     /// Menlo 等宽（特性行 / 拖装提示）。
     Mono,
-    /// 系统 semibold（图标名标签）。
-    Semibold,
 }
 
 fn font_for(size: f64, kind: TextKind) -> Retained<NSFont> {
@@ -164,7 +162,6 @@ fn font_for(size: f64, kind: TextKind) -> Retained<NSFont> {
         TextKind::Bold => NSFont::boldSystemFontOfSize(s(size)),
         TextKind::Mono => NSFont::fontWithName_size(&NSString::from_str("Menlo-Regular"), s(size))
             .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(s(size), 0.0)),
-        TextKind::Semibold => NSFont::systemFontOfSize_weight(s(size), 0.3),
     }
 }
 
@@ -176,15 +173,6 @@ fn draw_text(text: &str, x: f64, y: f64, size: f64, kind: TextKind, color: &NSCo
     unsafe {
         NSStringDrawing::drawAtPoint_withAttributes(&*ns, CGPoint::new(s(x), s(y)), Some(&attrs))
     };
-}
-
-/// 水平居中绘制（逻辑中心 cx）。
-fn draw_text_centered(text: &str, cx: f64, y: f64, size: f64, kind: TextKind, color: &NSColor) {
-    let attrs = text_attrs(&font_for(size, kind), color);
-    let ns = NSString::from_str(text);
-    // SAFETY: 属性字典类型正确（NSFont/NSColor 对应键）
-    let w = unsafe { NSStringDrawing::sizeWithAttributes(&*ns, Some(&attrs)) }.width;
-    draw_text(text, cx - w / 2.0 / SCALE, y, size, kind, color);
 }
 
 fn main() {
@@ -256,10 +244,10 @@ fn render(out: &str, _mtm: MainThreadMarker) {
     draw_text(
         "fuzzy search · ttl cleanup · auto paste",
         LEFT_W + 80.0,
-        H - 175.0 - 18.0,
-        15.0,
+        H - 175.0 - 20.0,
+        18.0,
         TextKind::Mono,
-        &srgb(152.0, 152.0, 159.0, 1.0),
+        &srgb(178.0, 178.0, 186.0, 1.0),
     );
 
     // —— 拖装区中带：图标 96pt 中心 (480/680, 300)，箭头 (545..618, 300) ——
@@ -276,10 +264,10 @@ fn render(out: &str, _mtm: MainThreadMarker) {
     draw_text(
         "D R A G   T O   A P P L I C A T I O N S",
         LEFT_W + 80.0,
-        H - 500.0 - 16.0,
-        13.0,
+        H - 495.0 - 17.0,
+        15.0,
         TextKind::Mono,
-        &srgb(124.0, 124.0, 133.0, 1.0),
+        &srgb(150.0, 150.0, 158.0, 1.0),
     );
 
     NSGraphicsContext::setCurrentContext(None);
