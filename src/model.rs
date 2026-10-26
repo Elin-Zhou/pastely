@@ -56,6 +56,24 @@ pub struct SearchableItem {
     pub pinned: bool,
 }
 
+/// 快捷片段（设置页 CRUD + 主面板快速输入）。
+#[derive(Debug, Clone)]
+pub struct SnippetItem {
+    pub id: i64,
+    pub name: String,
+    pub keyword: String,
+    pub content: String,
+    /// unix epoch 毫秒
+    pub updated_at: i64,
+}
+
+/// 主面板统一行模型：片段与剪贴板条目共用一个列表。
+#[derive(Debug, Clone)]
+pub enum ListItem {
+    Clip(SearchableItem),
+    Snippet(SnippetItem),
+}
+
 /// 当前时间的 unix epoch 毫秒。
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()

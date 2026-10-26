@@ -1,4 +1,4 @@
-//! SQLite 持久化：`ClipStore` 封装 clip_items 的全部读写。
+//! SQLite 持久化：`ClipStore` 封装 clip_items 与 snippets 的全部读写。
 //! 打开即建库 + 迁移 + WAL；库文件损坏的恢复（改名 `.bak` 重建）属装配层。
 
 mod migrations;
@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::Context;
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::model::{make_preview, now_ms, ClipKind, NewClipItem, SearchableItem};
+use crate::model::{make_preview, now_ms, ClipKind, NewClipItem, SearchableItem, SnippetItem};
 
 /// 一天的毫秒数（TTL 计算用）。
 const DAY_MS: i64 = 86_400_000;
@@ -149,6 +149,53 @@ impl ClipStore {
         )?;
         Ok(n)
     }
+
+    /// 全量片段，按 updated_at DESC。
+    pub fn list_snippets(&self) -> rusqlite::Result<Vec<SnippetItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, keyword, content, updated_at \
+             FROM snippets ORDER BY updated_at DESC",
+        )?;
+        let rows = stmt.query_map([], snippet_from_row)?;
+        rows.collect()
+    }
+
+    /// 写入片段：`id=None` 插入（created_at=updated_at=now），`Some(id)` 更新（仅 updated_at=now）；
+    /// 返回行 id。
+    pub fn upsert_snippet(
+        &self,
+        id: Option<i64>,
+        name: &str,
+        keyword: &str,
+        content: &str,
+        now: i64,
+    ) -> rusqlite::Result<i64> {
+        match id {
+            None => self.conn.query_row(
+                "INSERT INTO snippets (name, keyword, content, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)
+                 RETURNING id",
+                rusqlite::params![name, keyword, content, now],
+                |row| row.get(0),
+            ),
+            Some(id) => {
+                self.conn.execute(
+                    "UPDATE snippets
+                     SET name = ?2, keyword = ?3, content = ?4, updated_at = ?5
+                     WHERE id = ?1",
+                    rusqlite::params![id, name, keyword, content, now],
+                )?;
+                Ok(id)
+            }
+        }
+    }
+
+    /// 删除单条片段（幂等：id 不存在也返回 Ok）。
+    pub fn delete_snippet(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM snippets WHERE id = ?1", [id])?;
+        Ok(())
+    }
 }
 
 /// 列表查询 SQL（不含 image_data BLOB）。
@@ -188,6 +235,17 @@ fn searchable_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchableIt
         },
         created_at,
         pinned,
+    })
+}
+
+/// 行 → [`SnippetItem`]。
+fn snippet_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SnippetItem> {
+    Ok(SnippetItem {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        keyword: row.get(2)?,
+        content: row.get(3)?,
+        updated_at: row.get(4)?,
     })
 }
 
@@ -268,7 +326,7 @@ mod tests {
         let version: i64 = probe
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         drop(probe);
         // 重新打开：数据仍在
         let store = ClipStore::open(&db_path).unwrap();
@@ -455,5 +513,46 @@ mod tests {
             "count == max is not over"
         );
         assert_eq!(store.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn snippet_upsert_list_update_delete_flow() {
+        let store = ClipStore::open_in_memory().unwrap();
+        // 插入：created_at=updated_at=now
+        let id_a = store
+            .upsert_snippet(None, "签名", "sig", "张三", 1_000)
+            .unwrap();
+        let id_b = store
+            .upsert_snippet(None, "地址", "addr", "北京市", 2_000)
+            .unwrap();
+        assert_ne!(id_a, id_b);
+        // 列表按 updated_at DESC
+        let list = store.list_snippets().unwrap();
+        assert_eq!(
+            list.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![id_b, id_a]
+        );
+        assert_eq!(list[1].updated_at, 1_000);
+        assert_eq!(list[1].name, "签名");
+        assert_eq!(list[1].keyword, "sig");
+        assert_eq!(list[1].content, "张三");
+        // 更新：仅刷新 updated_at，不新增行；刷新后浮到列表首位
+        store
+            .upsert_snippet(Some(id_a), "签名改", "sig2", "李四", 3_000)
+            .unwrap();
+        let list = store.list_snippets().unwrap();
+        assert_eq!(list.len(), 2, "update must not insert a new row");
+        assert_eq!(list[0].id, id_a, "refreshed updated_at floats to top");
+        assert_eq!(list[0].name, "签名改");
+        assert_eq!(list[0].keyword, "sig2");
+        assert_eq!(list[0].content, "李四");
+        assert_eq!(list[0].updated_at, 3_000);
+        // 删除 + 幂等删除
+        store.delete_snippet(id_a).unwrap();
+        assert_eq!(store.list_snippets().unwrap().len(), 1);
+        store.delete_snippet(id_a).unwrap();
+        assert_eq!(store.list_snippets().unwrap().len(), 1);
+        store.delete_snippet(id_b).unwrap();
+        assert!(store.list_snippets().unwrap().is_empty());
     }
 }
