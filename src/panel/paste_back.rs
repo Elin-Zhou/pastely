@@ -17,6 +17,9 @@ use objc2::runtime::AnyObject;
 /// kVK_ANSI_V（HID 虚拟键码 V = 9）。
 const K_VK_ANSI_V: u16 = 9;
 
+/// kVK_ANSI_Left（HID 虚拟键码 左方向键 = 123）。
+const K_VK_ANSI_LEFT: u16 = 123;
+
 // ApplicationServices 框架的辅助功能信任检查（无需额外 crate）。
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
@@ -59,6 +62,25 @@ pub fn send_cmd_v() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 向会话事件口发送 n 次左方向键按下/抬起（kVK_ANSI_Left = 123，无修饰键）。
+///
+/// 用于 `{{cursor}}` 展开后把光标从文本末尾左移至落点（每键一位）。
+pub fn send_left_arrows(n: usize) -> anyhow::Result<()> {
+    for _ in 0..n {
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|()| anyhow!("创建 CGEventSource 失败"))?;
+        let down = CGEvent::new_keyboard_event(source, K_VK_ANSI_LEFT, true)
+            .map_err(|()| anyhow!("创建左方向键 keydown 事件失败"))?;
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|()| anyhow!("创建 CGEventSource 失败"))?;
+        let up = CGEvent::new_keyboard_event(source, K_VK_ANSI_LEFT, false)
+            .map_err(|()| anyhow!("创建左方向键 keyup 事件失败"))?;
+        down.post(CGEventTapLocation::Session);
+        up.post(CGEventTapLocation::Session);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +89,11 @@ mod tests {
     fn ax_trusted_does_not_crash() {
         // 只验证链接与调用安全；机器是否已授权因环境而异，不断言值。
         let _ = is_ax_trusted();
+    }
+
+    #[test]
+    fn send_zero_left_arrows_is_ok_and_posts_nothing() {
+        // n=0 不创建事件、不发送按键，仅验证调用安全。
+        send_left_arrows(0).unwrap();
     }
 }

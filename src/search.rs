@@ -3,7 +3,7 @@
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
-use crate::model::{ClipKind, SearchableItem};
+use crate::model::{ClipKind, SearchableItem, SnippetItem};
 
 /// 过滤 + 排序。
 ///
@@ -40,6 +40,31 @@ pub fn fuzzy_filter(items: &[SearchableItem], query: &str) -> Vec<(SearchableIte
     scored
         .into_iter()
         .map(|(_, item, highlights)| (item, highlights))
+        .collect()
+}
+
+/// 关键词模糊匹配（忽略大小写）。空查询返回空（片段不进空查询首屏）。
+///
+/// 匹配目标为 `keyword` 字段；返回项按分数降序，高亮索引相对 keyword 的 char 偏移。
+pub fn snippet_filter(snippets: &[SnippetItem], query: &str) -> Vec<(SnippetItem, Vec<usize>)> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    // 需求要求片段关键词忽略大小写（历史搜索的 Smart 行为保持不变）；
+    // 0.3.7 无独立 builder，matcher 自身链式 `ignore_case()` 即 CaseMatching::Ignore
+    let matcher = SkimMatcherV2::default().ignore_case();
+    let mut scored: Vec<(i64, SnippetItem, Vec<usize>)> = snippets
+        .iter()
+        .filter_map(|snippet| {
+            let (score, indices) = matcher.fuzzy_indices(&snippet.keyword, query)?;
+            Some((score, snippet.clone(), indices))
+        })
+        .collect();
+    scored.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+    scored
+        .into_iter()
+        .map(|(_, snippet, highlights)| (snippet, highlights))
         .collect()
 }
 
@@ -144,5 +169,66 @@ mod tests {
         // 多字节文本：char 偏移而非字节偏移
         let result = fuzzy_filter(&[text_item(1, "世界你好")], "世你");
         assert_eq!(result[0].1, vec![0, 2]);
+    }
+
+    fn snippet(id: i64, keyword: &str) -> SnippetItem {
+        SnippetItem {
+            id,
+            name: id.to_string(),
+            keyword: keyword.to_string(),
+            content: String::new(),
+            updated_at: id,
+        }
+    }
+
+    fn snippet_ids(result: &[(SnippetItem, Vec<usize>)]) -> Vec<i64> {
+        result.iter().map(|(s, _)| s.id).collect()
+    }
+
+    #[test]
+    fn snippet_empty_query_returns_empty() {
+        let snippets = vec![snippet(1, "sig"), snippet(2, "addr")];
+        assert!(snippet_filter(&snippets, "").is_empty());
+        assert!(snippet_filter(&snippets, "   \t ").is_empty());
+    }
+
+    #[test]
+    fn snippet_case_is_ignored() {
+        // 小写查询命中大写关键词
+        let result = snippet_filter(&[snippet(1, "SIG")], "sig");
+        assert_eq!(snippet_ids(&result), vec![1]);
+        // 大写查询命中小写关键词
+        let result = snippet_filter(&[snippet(1, "addr")], "ADDR");
+        assert_eq!(snippet_ids(&result), vec![1]);
+    }
+
+    #[test]
+    fn snippet_unmatched_are_dropped() {
+        let snippets = vec![snippet(1, "sig"), snippet(2, "addr")];
+        assert!(snippet_filter(&snippets, "zzz").is_empty());
+        let result = snippet_filter(&snippets, "ad");
+        assert_eq!(snippet_ids(&result), vec![2]);
+    }
+
+    #[test]
+    fn snippet_matches_sort_by_score_descending() {
+        // "sign" 连续命中得分明显高于散落命中
+        let snippets = vec![snippet(1, "sxxixxgxxn scattered"), snippet(2, "sign")];
+        let result = snippet_filter(&snippets, "sign");
+        assert_eq!(snippet_ids(&result), vec![2, 1]);
+    }
+
+    #[test]
+    fn snippet_highlight_indices_are_correct() {
+        // 前缀命中："signature" 中 "sig" → char 偏移 0..=2
+        let result = snippet_filter(&[snippet(1, "signature")], "sig");
+        assert_eq!(result[0].1, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn snippet_highlight_indices_count_chars_for_cjk() {
+        // 中文关键词："我的签名" 中 "签名" → char 偏移 2、3（非字节 6、9）
+        let result = snippet_filter(&[snippet(1, "我的签名")], "签名");
+        assert_eq!(result[0].1, vec![2, 3]);
     }
 }
