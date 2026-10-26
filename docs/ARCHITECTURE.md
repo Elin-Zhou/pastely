@@ -17,12 +17,13 @@
 src/
 ├── main.rs              # 装配层：目录初始化、依赖注入、AppKit 事件循环
 ├── lib.rs
-├── model.rs             # ClipItem 模型（200 字符预览规则）
+├── model.rs             # ClipItem 模型（200 字符预览规则）；ListItem 统一行模型
+├── expand.rs            # 片段变量展开（{{clipboard}}/{{date:…}}/{{cursor}}，纯函数）
 ├── clipboard/           # NSPasteboard 监听（changeCount 轮询；文本/图片、截断限制）
 │   ├── mod.rs           # Watcher（主线程 NSTimer tick）
 │   └── pasteboard.rs
-├── store/               # SQLite 持久化
-│   ├── mod.rs           # ClipStore（查询接口供 panel 使用）
+├── store/               # SQLite 持久化（v2 迁移：+ snippets 表）
+│   ├── mod.rs           # ClipStore（查询接口供 panel 使用，含片段 CRUD）
 │   └── migrations.rs    # user_version 迁移链
 ├── ttl.rs               # reap_once：过期清理 + 容量驱逐合并
 ├── search.rs            # fuzzy_filter（SkimMatcherV2）
@@ -33,7 +34,9 @@ src/
 │   ├── list_view.rs     # 分栏玻璃布局、列表渲染
 │   ├── search_field.rs  # 非激活 NSPanel 的 field editor 键盘路由、IME 守卫
 │   ├── paste_back.rs    # 会话条目回贴 + AX banner
-│   └── settings.rs      # 设置窗口（快捷键录制/限额/粘贴模式/主题/行数/自启动/AX 授权）
+│   ├── snippet_tab.rs   # 设置「快捷片段」Tab：片段列表 + 编辑/删除/新增入口
+│   ├── snippet_sheet.rs # 片段新增/编辑 sheet（「插入变量」菜单复用 expand::vars）
+│   └── settings.rs      # 设置窗口（Tab 化：通用表单 + 快捷片段 / 快捷键录制等）
 ├── update/              # 自动更新（GitHub Releases）
 │   ├── mod.rs           # UpdateManager 状态机（后台线程 + mpsc → 主线程 tickUpdate:）
 │   └── installer.rs     # 下载 DMG→挂载→ditto 拷贝→三段换名原子替换（失败严格回滚）
