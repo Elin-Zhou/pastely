@@ -65,9 +65,10 @@ define_class!(
     pub struct SnippetRowButton;
 );
 
-/// Tab 根视图的 ivars：行容器（documentView）与 AppController 句柄，
-/// 供 [`refresh`] 回读重建行。
+/// Tab 根视图的 ivars：滚动区 / 行容器（documentView）句柄与 AppController
+/// 句柄，供 [`refresh`] 回读重建行。
 struct SnippetTabIvars {
+    scroll_view: RefCell<Option<Retained<NSScrollView>>>,
     rows_container: RefCell<Option<Retained<NSView>>>,
     controller: *const AppController,
 }
@@ -82,6 +83,11 @@ define_class!(
 );
 
 impl SnippetTabView {
+    /// 滚动区句柄（可视高度以它为准，避免行高随上次重建结果单调增长）。
+    fn scroll_view(&self) -> Option<Retained<NSScrollView>> {
+        self.ivars().scroll_view.borrow().clone()
+    }
+
     /// 行容器（documentView）句柄。
     fn rows_container(&self) -> Option<Retained<NSView>> {
         self.ivars().rows_container.borrow().clone()
@@ -111,6 +117,7 @@ pub unsafe fn build(
         let width = super::settings::SETTINGS_WIDTH;
         let height = super::settings::tab_height();
         let root_alloc = SnippetTabView::alloc(mtm).set_ivars(SnippetTabIvars {
+            scroll_view: RefCell::new(None),
             rows_container: RefCell::new(None),
             controller,
         });
@@ -152,8 +159,10 @@ pub unsafe fn build(
         scroll.setDrawsBackground(false);
         let rows = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, scroll_w, scroll_h));
         scroll.setDocumentView(Some(&rows));
-        root.ivars().rows_container.borrow_mut().replace(rows);
         root.addSubview(&scroll);
+        // 句柄存入 ivars 供 refresh 回读（先 addSubview 再移交所有权）
+        root.ivars().scroll_view.borrow_mut().replace(scroll);
+        root.ivars().rows_container.borrow_mut().replace(rows);
 
         root.into_super()
     }
@@ -181,14 +190,20 @@ pub fn refresh(globals: &'static Globals) {
     let Some(rows_view) = tab.rows_container() else {
         return;
     };
+    // 可视高度以滚动区为准（documentView 高度随上次重建结果变化，
+    // 不能作为"视口高"参与 max 计算）
+    let area_h = tab
+        .scroll_view()
+        .map(|sv| sv.frame().size.height)
+        .unwrap_or(0.0);
+    let row_w = rows_view.frame().size.width;
     unsafe {
-        let area_h = rows_view.frame().size.height;
-        let row_w = rows_view.frame().size.width;
         for old in rows_view.subviews().iter() {
             old.removeFromSuperview();
         }
         if snippets.is_empty() {
-            // 空列表占位提示（居中）
+            // 空列表占位提示（居中）：行容器复位为视口高，避免沿用上次的大高度
+            rows_view.setFrameSize(CGSize::new(row_w, area_h));
             let hint = label(&NSString::from_str("暂无片段，点击右上角新增"), 12.0, mtm);
             hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
             hint.setAlignment(NSTextAlignment::Center);

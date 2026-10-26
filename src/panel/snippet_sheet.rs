@@ -328,6 +328,12 @@ pub fn show(globals: &'static Globals, parent: &NSWindow, edit: Option<SnippetIt
         content_view.setRichText(false);
         content_view.setFont(Some(&NSFont::systemFontOfSize(13.0)));
         content_view.setTextColor(Some(&NSColor::labelColor()));
+        // documentView 标准配方：高度随内容增长（宽度固定、随容器换行），
+        // 多行内容才能在滚动区内正常滚动
+        content_view.setVerticallyResizable(true);
+        content_view.setHorizontallyResizable(false);
+        content_view
+            .setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable);
         scroll.setDocumentView(Some(&content_view));
 
         // 变量行：「插入变量…」按钮 + 次级说明标签（占位提示采用次级标签
