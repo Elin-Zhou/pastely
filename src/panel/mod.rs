@@ -14,6 +14,8 @@ pub mod list_view;
 pub mod paste_back;
 pub mod search_field;
 pub mod settings;
+pub mod snippet_sheet;
+pub mod snippet_tab;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -494,6 +496,39 @@ define_class!(
         #[unsafe(method(closeSettings:))]
         fn close_settings(&self, _sender: Option<&AnyObject>) {
             settings::close(self.ivars().globals());
+        }
+
+        /// 设置页 Tab 分段切换：两个容器互斥显隐；切到「快捷片段」时刷新列表。
+        #[unsafe(method(snippetTabChanged:))]
+        fn snippet_tab_changed(&self, _sender: Option<&AnyObject>) {
+            let g = self.ivars().globals();
+            let Some(w) = *g.settings.borrow() else {
+                return;
+            };
+            let snippet_selected = w.selected_tab() == 1;
+            w.general_container.setHidden(snippet_selected);
+            w.snippet_container.setHidden(!snippet_selected);
+            if snippet_selected {
+                snippet_tab::refresh(g);
+            }
+        }
+
+        /// 「＋ 新增片段」：打开空白 sheet（业务在 snippet_tab）。
+        #[unsafe(method(addSnippet:))]
+        fn add_snippet(&self, _sender: Option<&AnyObject>) {
+            snippet_tab::add(self.ivars().globals());
+        }
+
+        /// 片段行「编辑」（sender ivars 携带 id）。
+        #[unsafe(method(editSnippet:))]
+        fn edit_snippet(&self, sender: Option<&AnyObject>) {
+            snippet_tab::edit(self.ivars().globals(), sender);
+        }
+
+        /// 片段行「删除」（sender ivars 携带 id，确认后删）。
+        #[unsafe(method(deleteSnippet:))]
+        fn delete_snippet(&self, sender: Option<&AnyObject>) {
+            snippet_tab::delete(self.ivars().globals(), sender);
         }
 
         #[unsafe(method(togglePause:))]

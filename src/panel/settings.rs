@@ -1,4 +1,9 @@
-//! 设置窗口：单例玻璃窗口 + 表单（快捷键 / 存储限额 / 粘贴模式 / 主题 / 列表行数）。
+//! 设置窗口：单例玻璃窗口 + Tab 化表单（「通用」：快捷键 / 存储限额 /
+//! 粘贴模式 / 主题 / 列表行数；「快捷片段」：[`super::snippet_tab`] 装入）。
+//!
+//! 本模块只做 Tab 容器装配：顶部 NSSegmentedControl 切换 `general_container`
+//! / `snippet_container` 互斥显隐（action → AppController 的 `snippetTabChanged:`，
+//! 切到快捷片段时触发列表刷新），片段业务全部在 snippet_tab / snippet_sheet。
 //!
 //! 打开入口：状态栏菜单「设置…」（⌘,）与主面板 field editor 的 ⌘,。
 //! 保存/取消经 nil-target 之外显式 target 到 [`super::AppController`] 的
@@ -10,8 +15,8 @@ use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSBackingStoreType, NSBeep, NSBezelStyle, NSButton, NSButtonType,
-    NSColor, NSEvent, NSEventModifierFlags, NSFont, NSPopUpButton, NSTextField, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSColor, NSEvent, NSEventModifierFlags, NSFont, NSPopUpButton, NSSegmentedControl, NSTextField,
+    NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::NSString;
@@ -21,20 +26,35 @@ use crate::config::{Config, PasteMode};
 
 /// 窗口尺寸。
 pub const SETTINGS_WIDTH: f64 = 400.0;
-pub const SETTINGS_HEIGHT: f64 = 470.0;
-/// 顶部内缩：FullSizeContentView 下红绿灯画在内容区左上，表单整体下移避开。
+pub const SETTINGS_HEIGHT: f64 = 560.0;
+/// 顶部内缩：FullSizeContentView 下红绿灯画在内容区左上，首行控件整体下移避开。
 const TOP_INSET: f64 = 36.0;
+/// Tab 分段控件高度（brief：24–28 取中）。
+const SEGMENT_HEIGHT: f64 = 26.0;
+/// 分段控件距红绿灯区 / 下方内容容器的间距。
+const SEGMENT_TOP_GAP: f64 = 8.0;
+const SEGMENT_BOTTOM_GAP: f64 = 12.0;
 
-/// 表单容器高（= 窗口高 - 顶部内缩）。
-fn form_height() -> f64 {
-    SETTINGS_HEIGHT - TOP_INSET
+/// Segment 标题常量（规约：禁魔法字符串；索引语义与
+/// `AppController::snippet_tab_changed` 的分支一一对应）。
+const TAB_GENERAL_TITLE: &str = "通用";
+const TAB_SNIPPET_TITLE: &str = "快捷片段";
+
+/// 分段控件 y（窗口底坐标：红绿灯区之下）。
+fn segment_y() -> f64 {
+    SETTINGS_HEIGHT - TOP_INSET - SEGMENT_HEIGHT - SEGMENT_TOP_GAP
+}
+
+/// Tab 内容容器高（通用表单 / 快捷片段列表两个同尺寸全高容器）。
+pub(crate) fn tab_height() -> f64 {
+    segment_y() - SEGMENT_BOTTOM_GAP
 }
 
 /// 表单行几何：第 `k` 行控件底 y（容器内非翻转坐标，自顶部下排）。
 fn row_y(k: usize) -> f64 {
     let row_h = 24.0;
     let gap = 10.0;
-    let top = form_height() - 16.0;
+    let top = tab_height() - 16.0;
     top - (k as f64 + 1.0) * row_h - k as f64 * gap
 }
 
@@ -178,6 +198,12 @@ fn vk_to_key_name(key_code: u16, chars: &str) -> Option<String> {
 /// 设置窗口 + 表单控件句柄（泄漏单例，主线程访问）。
 pub struct SettingsWindow {
     pub window: Retained<NSWindow>,
+    /// Tab 分段控件（「通用」/「快捷片段」，action → `snippetTabChanged:`）。
+    segment: Retained<NSSegmentedControl>,
+    /// 通用表单容器（现有表单整体搬入，行几何相对容器）。
+    pub(crate) general_container: Retained<NSView>,
+    /// 快捷片段容器（[`super::snippet_tab`] 的根视图装入，切 Tab 时刷新）。
+    pub(crate) snippet_container: Retained<NSView>,
     launch_btn: Retained<NSButton>,
     ax_status: Retained<NSTextField>,
     ax_open_btn: Retained<NSButton>,
@@ -270,6 +296,11 @@ impl SettingsWindow {
 
     pub(crate) fn order_out(&self) {
         self.window.orderOut(None);
+    }
+
+    /// 当前选中 Tab（0 = 通用，1 = 快捷片段；`snippetTabChanged:` 读取）。
+    pub(crate) fn selected_tab(&self) -> isize {
+        self.segment.selectedSegment()
     }
 
     /// 结束录制（取消/关窗/保存前调用，恢复全局快捷键）。
@@ -478,14 +509,33 @@ unsafe fn build(
             cv.addSubview(&backdrop);
         }
 
-        // 表单容器：整体位于红绿灯区域之下（TOP_INSET），行几何全部相对容器
-        let form = NSView::initWithFrame(
-            NSView::alloc(mtm),
-            rect(0.0, 0.0, SETTINGS_WIDTH, form_height()),
+        // Tab 分段控件：红绿灯区之下，宽度撑满内容区减边距
+        let segment = NSSegmentedControl::initWithFrame(
+            NSSegmentedControl::alloc(mtm),
+            rect(16.0, segment_y(), SETTINGS_WIDTH - 32.0, SEGMENT_HEIGHT),
         );
-        if let Some(cv) = window.contentView() {
-            cv.addSubview(&form);
-        }
+        segment.setSegmentCount(2);
+        segment.setLabel_forSegment(&NSString::from_str(TAB_GENERAL_TITLE), 0);
+        segment.setLabel_forSegment(&NSString::from_str(TAB_SNIPPET_TITLE), 1);
+        segment.setSelectedSegment(0);
+        let segment_target: &objc2::runtime::AnyObject = controller;
+        segment.setTarget(Some(segment_target));
+        segment.setAction(Some(objc2::sel!(snippetTabChanged:)));
+
+        // 通用表单容器：整体位于分段控件之下（行几何全部相对容器）
+        let general_container = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            rect(0.0, 0.0, SETTINGS_WIDTH, tab_height()),
+        );
+
+        // 快捷片段容器：与通用容器同尺寸全高，默认隐藏（snippet_tab 根视图装入）
+        let snippet_container = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            rect(0.0, 0.0, SETTINGS_WIDTH, tab_height()),
+        );
+        snippet_container.setHidden(true);
+        let tab_root = super::snippet_tab::build(mtm, globals, controller);
+        snippet_container.addSubview(&tab_root);
 
         let label = |text: &str, y: f64| {
             let l = NSTextField::labelWithString(&NSString::from_str(text), mtm);
@@ -602,9 +652,11 @@ unsafe fn build(
             n
         };
 
-        // 挂载：玻璃 → 表单容器（标签 + 控件 + 注记 + 按钮）
+        // 挂载：玻璃 → 分段控件 → 两个 Tab 容器（通用 + 快捷片段）
         if let Some(cv) = window.contentView() {
-            cv.addSubview(&form);
+            cv.addSubview(&segment);
+            cv.addSubview(&general_container);
+            cv.addSubview(&snippet_container);
         }
         for (text, y) in [
             ("开机自启动", row_y(0)),
@@ -617,25 +669,28 @@ unsafe fn build(
             ("自动粘贴授权", row_y(7)),
         ] {
             let l = label(text, y);
-            form.addSubview(&l);
+            general_container.addSubview(&l);
         }
-        form.addSubview(&launch_btn);
-        form.addSubview(&hotkey_field);
-        form.addSubview(&ttl_field);
-        form.addSubview(&capacity_field);
-        form.addSubview(&paste_popup);
-        form.addSubview(&theme_popup);
-        form.addSubview(&rows_field);
-        form.addSubview(&rows_note);
-        form.addSubview(&ax_status);
-        form.addSubview(&ax_request_btn);
-        form.addSubview(&ax_open_btn);
-        form.addSubview(&ax_note);
-        form.addSubview(&save_btn);
-        form.addSubview(&cancel_btn);
+        general_container.addSubview(&launch_btn);
+        general_container.addSubview(&hotkey_field);
+        general_container.addSubview(&ttl_field);
+        general_container.addSubview(&capacity_field);
+        general_container.addSubview(&paste_popup);
+        general_container.addSubview(&theme_popup);
+        general_container.addSubview(&rows_field);
+        general_container.addSubview(&rows_note);
+        general_container.addSubview(&ax_status);
+        general_container.addSubview(&ax_request_btn);
+        general_container.addSubview(&ax_open_btn);
+        general_container.addSubview(&ax_note);
+        general_container.addSubview(&save_btn);
+        general_container.addSubview(&cancel_btn);
 
         SettingsWindow {
             window,
+            segment,
+            general_container,
+            snippet_container,
             launch_btn,
             ax_status,
             ax_open_btn,
