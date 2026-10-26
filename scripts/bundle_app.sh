@@ -95,8 +95,25 @@ else
     echo "警告：图标绘制失败，跳过（使用系统默认图标）" >&2
 fi
 
-# ad-hoc 签名（本地运行免 Gatekeeper 阻断；分发需开发者证书另签）
-codesign --force -s - "$APP"
+# ad-hoc 签名会让每次更新丢失辅助功能授权（TCC 按 cdhash 匹配）。
+# 默认改用钥匙串中的 Apple Development 证书：身份引用证书字段（CN/Team ID），
+# 跨版本稳定 → 用户授权一次后更新不再重复授权；证书续期（同 CN/团队）不影响。
+# SIGN_IDENTITY=- 可显式退回 ad-hoc。
+SIGN_IDENTITY="${SIGN_IDENTITY:-Apple Development}"
+if [ "$SIGN_IDENTITY" = "-" ]; then
+    SIGN_ARGS=(-s -)
+else
+    if ! security find-identity -v -p codesigning | grep -qF "$SIGN_IDENTITY"; then
+        echo "错误：钥匙串中找不到代码签名身份「$SIGN_IDENTITY」" >&2
+        echo "  检查：security find-identity -v -p codesigning" >&2
+        echo "  或用 SIGN_IDENTITY=- 退回 ad-hoc（更新后用户需重新授权辅助功能）" >&2
+        exit 1
+    fi
+    SIGN_ARGS=(-s "$SIGN_IDENTITY")
+fi
+codesign --force "${SIGN_ARGS[@]}" "$APP"
+codesign --verify --strict "$APP"
+codesign -dv "$APP" 2>&1 | grep -E "Authority|Identifier=" || true
 
 # DMG 设计化：AppKit 渲染背景图 → 可读写临时 DMG + Finder 图标布局 → 压缩只读成品
 BG_DIR="$DIST/.background_tmp"
