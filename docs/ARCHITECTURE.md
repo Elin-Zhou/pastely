@@ -1,37 +1,60 @@
 # ARCHITECTURE.md
 
-> ⚠️ 初始版本（2026-10-25）：项目尚无业务代码，本文档基于需求预写，供技术方案阶段参考。首个版本落地后必须校准。
+> 校准版本（2026-10-26）：基于 master@cae7bcc 实际代码生成，替代 2026-10-25 的预写草案。
 
 ## 技术栈
 
-- 语言：Rust（edition 2021）
-- 平台：macOS（darwin，Apple Silicon 优先）
-- 存储：内嵌 SQLite（rusqlite，schema 由应用自管）
-- UI/弹窗与全局快捷键：待技术方案阶段定稿（候选：Tauri / egui+winit / 原生 AppKit 绑定）
+- 语言：Rust（edition 2021），UI 直接用 objc2 系 crate 调原生 AppKit（非 Tauri/egui）
+- 平台：macOS 10.13+（高版本特性经 `compat.rs` 特性开关守卫）
+- 存储：内嵌 SQLite（rusqlite，WAL，`user_version` 迁移链）
+- 搜索：fuzzy-matcher（SkimMatcherV2 评分 + 预览区高亮）
+- 配置：TOML（serde + toml）
+- 更新检测：ureq（GitHub Releases API）
 
-## 预期模块分层（草案）
+## 实际模块结构
 
 ```
-cliphub/
-├── src/
-│   ├── main.rs          # 入口：启动后台服务 + 事件循环
-│   ├── clipboard/       # 剪切板监听与读写（文本/图片，含差异检测）
-│   ├── store/           # 持久化（SQLite：条目、TTL 过期清理）
-│   ├── hotkey/          # 全局快捷键注册与分发
-│   ├── ui/              # 弹窗 UI（搜索框焦点、模糊搜索、列表渲染）
-│   ├── search/          # 模糊匹配算法
-│   └── config/          # 用户配置（快捷键、TTL、开关）
+src/
+├── main.rs              # 装配层：目录初始化、依赖注入、AppKit 事件循环
+├── lib.rs
+├── model.rs             # ClipItem 模型（200 字符预览规则）
+├── clipboard/           # NSPasteboard 监听（changeCount 轮询；文本/图片、截断限制）
+│   ├── mod.rs           # Watcher（主线程 NSTimer tick）
+│   └── pasteboard.rs
+├── store/               # SQLite 持久化
+│   ├── mod.rs           # ClipStore（查询接口供 panel 使用）
+│   └── migrations.rs    # user_version 迁移链
+├── ttl.rs               # reap_once：过期清理 + 容量驱逐合并
+├── search.rs            # fuzzy_filter（SkimMatcherV2）
+├── hotkey.rs            # parse_hotkey 纯解析器 + HotkeyManager（global-hotkey）
+├── config.rs            # TOML 配置（spec 默认值、load/save、PasteMode、数据目录迁移）
+├── panel/               # 弹窗面板与装配中枢（主线程单访）
+│   ├── mod.rs           # Globals（泄漏一次的全局态）、AppController（NSTimer tick/状态栏菜单/delegate）
+│   ├── list_view.rs     # 分栏玻璃布局、列表渲染
+│   ├── search_field.rs  # 非激活 NSPanel 的 field editor 键盘路由、IME 守卫
+│   ├── paste_back.rs    # 会话条目回贴 + AX banner
+│   └── settings.rs      # 设置窗口（快捷键录制/限额/粘贴模式/主题/行数/自启动/AX 授权）
+├── update/              # 自动更新（GitHub Releases）
+│   ├── mod.rs           # UpdateManager 状态机（后台线程 + mpsc → 主线程 tickUpdate:）
+│   └── installer.rs     # 下载 DMG→挂载→ditto 拷贝→三段换名原子替换（失败严格回滚）
+├── autostart.rs         # 开机自启分派：13+ SMAppService
+├── autostart_legacy.rs  # 10.13–12.x LSSharedFileList（常量一律运行时构造字符串）
+├── compat.rs            # OS 版本探测与特性开关（glass/SMAppService/symbol image/accent）
+└── bin/gen_dmg_bg.rs    # DMG 安装背景生成器（AppKit 渲染，构建辅助）
 ```
 
 ## 依赖规则
 
-- `ui` 不得直接访问 `store` 内部 SQL，一律走 `store` 暴露的查询接口
-- `clipboard` 产生的条目经 `store` 落库后才对 `ui` 可见
-- `config` 为最底层，被所有模块依赖，不依赖任何业务模块
+- UI（panel）不直接访问 store 内部 SQL，一律走 `ClipStore` 查询接口
+- clipboard 产生的条目经 store 落库后才对 panel 可见
+- config 为最底层，被所有模块依赖，不依赖任何业务模块
+- 全部 OS 版本门槛收敛在 `compat.rs`（规约：禁止魔法值散落）；extern static 禁止直接引用（dyld 启动期解析崩险），高版本 API 调用前须经对应开关守卫
 
 ## 关键决策记录
 
 | 日期 | 决策 | 状态 |
 |------|------|------|
-| 2026-10-25 | 使用 SQLite 做历史持久化 | 待方案确认 |
-| 2026-10-25 | UI 框架选型 | 待 brainstorming |
+| 2026-10-25 | 使用 SQLite（rusqlite + WAL + user_version 迁移）做历史持久化 | 已落地 |
+| 2026-10-25 | UI 选型：原生 AppKit（objc2）玻璃面板，非 Tauri/egui | 已落地 |
+| 2026-10-26 | 自动更新走 GitHub Releases + DMG 原子替换安装 | 已落地（d7eb702） |
+| 2026-10-26 | 兼容 macOS 10.13：compat.rs 特性开关 + 运行时字符串规避 extern static | 已落地（d7eb702） |
