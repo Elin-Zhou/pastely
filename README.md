@@ -17,7 +17,7 @@ brew install --cask pastely
 ```bash
 curl -LO https://github.com/Elin-Zhou/pastely/releases/latest/download/Pastely.dmg
 ```
-（重命名版本号下载后打开 DMG 拖入 Applications；见 [Releases](https://github.com/Elin-Zhou/pastely/releases)）
+（下载后打开 DMG 拖入 Applications；见 [Releases](https://github.com/Elin-Zhou/pastely/releases)）
 
 方式三（浏览器直接下载 DMG）：打开后拖入 Applications。首次打开若被 macOS 拦截（“无法验证开发者”）：系统设置 → 隐私与安全性 → 点「仍要打开」；或执行 `xattr -cr /Applications/Pastely.app`。
 
