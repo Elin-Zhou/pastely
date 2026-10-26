@@ -29,9 +29,9 @@ use objc2_app_kit::{
     NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
     NSBackingStoreType, NSBezelStyle, NSBox, NSBoxType, NSButton, NSColor,
     NSControlTextEditingDelegate, NSEvent, NSFont, NSGlassEffectView, NSGlassEffectViewStyle,
-    NSImage, NSImageView, NSMenu, NSMenuItem, NSPanel, NSScreen, NSScrollView, NSScrollerStyle,
-    NSSearchField, NSSearchFieldDelegate, NSStatusBar, NSStatusItem, NSTableCellView,
-    NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSView,
+    NSImage, NSImageView, NSLineBreakMode, NSMenu, NSMenuItem, NSPanel, NSScreen, NSScrollView,
+    NSScrollerStyle, NSSearchField, NSSearchFieldDelegate, NSStatusBar, NSStatusItem,
+    NSTableCellView, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSView,
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace,
 };
@@ -41,13 +41,14 @@ use objc2_foundation::{NSData, NSNotification, NSObjectProtocol, NSString};
 use crate::clipboard::{self, WatcherState};
 use crate::compat;
 use crate::config::PasteMode;
+use crate::expand::expand;
 use crate::hotkey::HotkeyManager;
-use crate::model::{ClipKind, SearchableItem};
-use crate::search::fuzzy_filter;
+use crate::model::{ClipKind, ListItem};
+use crate::search::{fuzzy_filter, snippet_filter};
 use crate::store::ClipStore;
 use crate::update::{ReleaseInfo, UpdateEvent, UpdateManager, UpdateState};
 
-use list_view::{build_row, ROW_HEIGHT};
+use list_view::{build_row, build_snippet_row, ROW_HEIGHT};
 use search_field::PanelFieldEditor;
 
 /// 面板宽度（pt）。
@@ -69,6 +70,15 @@ const LIST_REBUILD_LIMIT: usize = 200;
 /// `NSStatusItemVariableLength`（AppKit 语义：状态栏 item 宽度随内容自适应）。
 /// objc2-app-kit 0.3.2 未导出该常量，按 Apple 文档取值 -1.0。
 const NS_STATUS_ITEM_VARIABLE_LENGTH: f64 = -1.0;
+
+/// 片段粘贴后光标左移键的投递延时（毫秒）。
+///
+/// 启发式值：Cmd+V 经 CGEventPost 投递到目标应用后，粘贴落盘与目标
+/// 输入框光标就位是异步的；过短则左移键可能早于粘贴到达（被目标应用
+/// 丢弃或作用于粘贴前的光标位置），过长则光标明显滞后。80ms 取常见
+/// 应用（文本编辑器/浏览器输入框）的实测中位偏保守值，v1.1 可做成
+/// 可配置项。
+const CURSOR_ARROW_DELAY_MS: u64 = 80;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
     CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
@@ -111,15 +121,29 @@ impl Globals {
     }
 
     /// 查询变化：重算过滤结果并刷新列表（全量重建上限 200 行，主线程亚毫秒）。
+    ///
+    /// 双查询合并：片段（关键词匹配）在前、剪贴板历史在后，共用一个列表；
+    /// 空查询时 `snippet_filter` 返回空 → 首屏仍只有剪贴板历史（同 v0.2 行为）。
     pub fn refresh_search(&self, query: &str) {
         let Some(rt) = self.runtime() else {
             return;
         };
-        let items = {
+        let (clips, snippets) = {
             let store = self.store.lock().expect("store poisoned");
-            store.all_searchable().unwrap_or_default()
+            let clips = store.all_searchable().unwrap_or_default();
+            let snippets = store.list_snippets().unwrap_or_default();
+            (clips, snippets)
         };
-        rt.filtered = fuzzy_filter(&items, query);
+        let mut merged: Vec<(ListItem, Vec<usize>)> = snippet_filter(&snippets, query)
+            .into_iter()
+            .map(|(snippet, highlights)| (ListItem::Snippet(snippet), highlights))
+            .collect();
+        merged.extend(
+            fuzzy_filter(&clips, query)
+                .into_iter()
+                .map(|(item, highlights)| (ListItem::Clip(item), highlights)),
+        );
+        rt.filtered = merged;
         // 滚动列表：不再截断到 max_list_rows（它仅决定面板高度）
         rt.filtered.truncate(LIST_REBUILD_LIMIT);
         rt.selected = 0;
@@ -177,6 +201,9 @@ impl Globals {
     }
 
     /// 确认当前选择：写剪切板 → 隐藏 → 防回环 → （auto 且已授权）模拟 ⌘V。
+    ///
+    /// `Clip` 分支：原样写条目内容；`Snippet` 分支：实时展开变量后写展开结果，
+    /// 有 `{{cursor}}` 时在 ⌘V 后延时投递左方向键把光标移到落点。
     pub fn confirm(&self) {
         let Some(rt) = self.runtime() else {
             return;
@@ -184,58 +211,97 @@ impl Globals {
         let Some((item, _)) = rt.filtered.get(rt.selected) else {
             return;
         };
-        match item.kind {
-            ClipKind::Text => clipboard::pasteboard::write_text(&item.full_text),
-            ClipKind::Image => {
-                let png = {
-                    let store = self.store.lock().expect("store poisoned");
-                    store.image_bytes(item.id).unwrap_or(None)
-                };
-                match png {
-                    Some(bytes) => clipboard::pasteboard::write_image_png(&bytes),
-                    None => tracing::error!("图片条目 {} 的 BLOB 读取失败", item.id),
+        // 仅 Snippet 分支有值：{{cursor}} 后置字符数（⌘V 成功后左移的键数）
+        let mut cursor_arrows: Option<usize> = None;
+        match item {
+            ListItem::Clip(item) => match item.kind {
+                ClipKind::Text => clipboard::pasteboard::write_text(&item.full_text),
+                ClipKind::Image => {
+                    let png = {
+                        let store = self.store.lock().expect("store poisoned");
+                        store.image_bytes(item.id).unwrap_or(None)
+                    };
+                    match png {
+                        Some(bytes) => clipboard::pasteboard::write_image_png(&bytes),
+                        None => tracing::error!("图片条目 {} 的 BLOB 读取失败", item.id),
+                    }
                 }
+            },
+            ListItem::Snippet(snippet) => {
+                // 每次确认实时展开（剪切板/日期取当下值）
+                let clip_text = clipboard::pasteboard::read_text();
+                let exp = expand(
+                    &snippet.content,
+                    crate::model::now_ms(),
+                    clip_text.as_deref(),
+                );
+                clipboard::pasteboard::write_text(&exp.text);
+                cursor_arrows = exp.cursor_char.map(|off| {
+                    // {{cursor}} 落点：粘贴后光标在文本末尾，需左移「后置字符数」位
+                    exp.text.chars().count().saturating_sub(off)
+                });
             }
         }
         // 防自回环：把基线推进到刚才自己写出的 changeCount
+        //（Clip 与 Snippet 分支同语义：snippet 写入的展开结果同样不应被再次记录）
         self.watcher.borrow_mut().last_count = clipboard::pasteboard::change_count();
 
         if let Some(p) = self.panel() {
             p.hide();
         }
-        if matches!(self.config.borrow().paste.mode, PasteMode::Auto) {
-            let mode = self.config.borrow().paste.mode;
-            let mut trusted = paste_back::is_ax_trusted();
-            // 首次未授权：触发系统授权弹框（AXIsProcessTrustedWithOptions prompt，
-            // 仅此一次；之后经横幅按钮 / 系统设置授权，is_ax_trusted 即转正常路径）
-            if !trusted && !*self.ax_prompt_shown.borrow() {
-                *self.ax_prompt_shown.borrow_mut() = true;
-                trusted = paste_back::request_ax_permission();
-                tracing::info!("paste-back: 已触发系统辅助功能授权弹框，granted_now={trusted}");
+        if self.auto_paste_back() {
+            if let Some(trailing) = cursor_arrows.filter(|n| *n > 0) {
+                // CGEventPost 线程安全：延时投递放后台线程，不阻塞主线程
+                //（sleep 会占用线程，主线程等待会卡住面板动画与事件循环）
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(CURSOR_ARROW_DELAY_MS));
+                    if let Err(e) = paste_back::send_left_arrows(trailing) {
+                        tracing::error!("paste-back: 光标左移投递失败: {e:#}");
+                    }
+                });
             }
-            tracing::info!("paste-back: ax_trusted={} mode={:?}", trusted, mode);
-            if trusted {
-                match paste_back::send_cmd_v() {
-                    Ok(()) => tracing::info!("paste-back: Cmd+V 已投递（session tap）"),
-                    Err(e) => tracing::error!("paste-back: 投递失败: {e:#}"),
-                }
-            } else {
-                // 针对性提示：ad-hoc 签名每次重新打包 cdhash 变化，
-                // TCC 按 designated requirement 匹配 → 旧授权对新 build 失效，
-                // 系统设置里看似已开启但 AXIsProcessTrusted() 返回 false
-                tracing::warn!(
-                    "AX 授权检查未通过（is_ax_trusted=false），本次降级为仅复制。\
-                     若系统设置中已开启：ad-hoc 签名在重新打包后需删除旧条目重新授权\
-                     （系统设置中选中 Pastely 按 '-' 删除，再触发一次粘贴以弹出授权框）"
+        }
+    }
+
+    /// 自动粘贴段（Clip/Snippet 共用）：Auto 模式且 AX 授权（首次未授权触发
+    /// 系统授权弹框）时投递 ⌘V。返回是否已投递。
+    fn auto_paste_back(&self) -> bool {
+        let mode = self.config.borrow().paste.mode;
+        if !matches!(mode, PasteMode::Auto) {
+            return false;
+        }
+        let mut trusted = paste_back::is_ax_trusted();
+        // 首次未授权：触发系统授权弹框（AXIsProcessTrustedWithOptions prompt，
+        // 仅此一次；之后经横幅按钮 / 系统设置授权，is_ax_trusted 即转正常路径）
+        if !trusted && !*self.ax_prompt_shown.borrow() {
+            *self.ax_prompt_shown.borrow_mut() = true;
+            trusted = paste_back::request_ax_permission();
+            tracing::info!("paste-back: 已触发系统辅助功能授权弹框，granted_now={trusted}");
+        }
+        tracing::info!("paste-back: ax_trusted={trusted} mode={mode:?}");
+        if trusted {
+            match paste_back::send_cmd_v() {
+                Ok(()) => tracing::info!("paste-back: Cmd+V 已投递（session tap）"),
+                Err(e) => tracing::error!("paste-back: 投递失败: {e:#}"),
+            }
+            true
+        } else {
+            // 针对性提示：ad-hoc 签名每次重新打包 cdhash 变化，
+            // TCC 按 designated requirement 匹配 → 旧授权对新 build 失效，
+            // 系统设置里看似已开启但 AXIsProcessTrusted() 返回 false
+            tracing::warn!(
+                "AX 授权检查未通过（is_ax_trusted=false），本次降级为仅复制。\
+                 若系统设置中已开启：ad-hoc 签名在重新打包后需删除旧条目重新授权\
+                 （系统设置中选中 Pastely 按 '-' 删除，再触发一次粘贴以弹出授权框）"
+            );
+            let mut hinted = self.ax_hint_shown.borrow_mut();
+            if !*hinted {
+                *hinted = true;
+                tracing::info!(
+                    "提示：系统设置 → 隐私与安全性 → 辅助功能 中勾选 Pastely 后可自动粘贴"
                 );
-                let mut hinted = self.ax_hint_shown.borrow_mut();
-                if !*hinted {
-                    *hinted = true;
-                    tracing::info!(
-                        "提示：系统设置 → 隐私与安全性 → 辅助功能 中勾选 Pastely 后可自动粘贴"
-                    );
-                }
             }
+            false
         }
     }
 
@@ -273,7 +339,8 @@ impl Globals {
 pub struct PanelRuntime {
     /// 指向泄漏的 [`Globals`]。
     pub g: *const Globals,
-    pub filtered: Vec<(SearchableItem, Vec<usize>)>,
+    /// 当前过滤结果：片段在前、剪贴板历史在后（见 [`Globals::refresh_search`]）。
+    pub filtered: Vec<(ListItem, Vec<usize>)>,
     pub selected: usize,
 }
 
@@ -833,10 +900,10 @@ impl PanelController {
     }
 
     /// 全量重建列表行并标注选中行；内容自顶部排布、选中行滚入可视区；
-    /// 尾部同步刷新右栏预览。
+    /// 尾部同步刷新右栏预览。图片 BLOB 仅 `Clip(Image)` 行按需加载。
     pub fn update_list(
         &self,
-        rows: &[(SearchableItem, Vec<usize>)],
+        rows: &[(ListItem, Vec<usize>)],
         selected: usize,
         load_image: ImageLoader,
     ) {
@@ -853,21 +920,28 @@ impl PanelController {
                 .setFrame(rect(0.0, 0.0, LIST_WIDTH, container_h));
             let mut selected_png: Option<Vec<u8>> = None;
             for (i, (item, highlights)) in rows.iter().enumerate() {
-                let png: Option<Vec<u8>> = match item.kind {
-                    ClipKind::Image => load_image(item.id),
-                    ClipKind::Text => None,
+                let row = match item {
+                    ListItem::Clip(clip) => {
+                        let png: Option<Vec<u8>> = match clip.kind {
+                            ClipKind::Image => load_image(clip.id),
+                            ClipKind::Text => None,
+                        };
+                        if i == selected {
+                            selected_png = png.clone();
+                        }
+                        build_row(
+                            mtm,
+                            LIST_WIDTH,
+                            clip,
+                            highlights,
+                            png.as_deref(),
+                            i == selected,
+                        )
+                    }
+                    ListItem::Snippet(snippet) => {
+                        build_snippet_row(mtm, LIST_WIDTH, snippet, highlights, i == selected)
+                    }
                 };
-                if i == selected {
-                    selected_png = png.clone();
-                }
-                let row = build_row(
-                    mtm,
-                    LIST_WIDTH,
-                    item,
-                    highlights,
-                    png.as_deref(),
-                    i == selected,
-                );
                 // 行 y 从顶部排
                 let y = container_h - (i as f64 + 1.0) * ROW_HEIGHT;
                 row.setFrame(rect(0.0, y, LIST_WIDTH, ROW_HEIGHT));
@@ -886,10 +960,13 @@ impl PanelController {
         }
     }
 
-    /// 渲染右栏预览：Text → 只读文本；Image → 居中缩放 + 尺寸/体积小字；空 → 占位提示。
+    /// 渲染右栏预览：
+    /// Clip(Text) → 只读文本；Clip(Image) → 居中缩放 + 尺寸/体积小字；
+    /// Snippet → 标题行 + 实时展开后的只读文本 + 「已按当前上下文展开」注记；
+    /// 空 → 占位提示。
     ///
     /// 文本颜色用系统动态色（labelColor/secondaryLabelColor），深浅色自动切换。
-    pub fn update_preview(&self, item: Option<&SearchableItem>, png: Option<&[u8]>) {
+    pub fn update_preview(&self, item: Option<&ListItem>, png: Option<&[u8]>) {
         unsafe {
             let mtm = MainThreadMarker::new().expect("main thread");
             // 清空旧内容（subviews() 返回快照数组，边遍历边移除安全）
@@ -900,14 +977,23 @@ impl PanelController {
             let pw = PANEL_WIDTH - LIST_WIDTH - 1.0;
             let ph = self.preview_container.frame().size.height;
             let Some(item) = item else {
-                let hint =
-                    NSTextField::labelWithString(&NSString::from_str("输入以过滤剪切板历史"), mtm);
+                let hint = NSTextField::labelWithString(
+                    &NSString::from_str("输入以过滤剪切板历史与片段"),
+                    mtm,
+                );
                 hint.setFont(Some(&NSFont::systemFontOfSize(13.0)));
                 hint.setTextColor(Some(&NSColor::secondaryLabelColor()));
                 hint.setAlignment(NSTextAlignment::Center);
                 hint.setFrame(rect(8.0, ph / 2.0 - 10.0, pw - 16.0, 20.0));
                 self.preview_container.addSubview(&hint);
                 return;
+            };
+            let item = match item {
+                ListItem::Snippet(snippet) => {
+                    self.update_snippet_preview(snippet);
+                    return;
+                }
+                ListItem::Clip(clip) => clip,
             };
             match item.kind {
                 ClipKind::Text => {
@@ -950,6 +1036,57 @@ impl PanelController {
                 }
             }
         }
+    }
+
+    /// 片段预览：顶部「名称 · 关键词」标题行，主体为只读 NSTextView 展示
+    /// `expand` 实时展开后的内容（每次渲染重新展开，剪切板/日期取当下值），
+    /// 底部小字注记提示内容已按当前上下文展开。
+    fn update_snippet_preview(&self, snippet: &crate::model::SnippetItem) {
+        let mtm = MainThreadMarker::new().expect("main thread");
+        let pw = PANEL_WIDTH - LIST_WIDTH - 1.0;
+        let ph = self.preview_container.frame().size.height;
+
+        // 顶部标题行：名称 · 关键词（次级色 11pt）
+        let title = NSTextField::labelWithString(
+            &NSString::from_str(&format!("{} · {}", snippet.name, snippet.keyword)),
+            mtm,
+        );
+        title.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        title.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        title.setFrame(rect(12.0, ph - 20.0, pw - 24.0, 16.0));
+        self.preview_container.addSubview(&title);
+
+        // 主体：展开后的内容（只读）
+        const NOTE_HEIGHT: f64 = 20.0;
+        const TITLE_SPACE: f64 = 24.0;
+        let clip_text = clipboard::pasteboard::read_text();
+        let exp = expand(
+            &snippet.content,
+            crate::model::now_ms(),
+            clip_text.as_deref(),
+        );
+        let body_h = ph - TITLE_SPACE - NOTE_HEIGHT;
+        let tv = NSTextView::initWithFrame(
+            NSTextView::alloc(mtm),
+            rect(0.0, NOTE_HEIGHT, pw, body_h.max(0.0)),
+        );
+        tv.setEditable(false);
+        tv.setSelectable(true);
+        tv.setDrawsBackground(false);
+        tv.setRichText(false);
+        tv.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+        tv.setTextColor(Some(&NSColor::labelColor()));
+        tv.setTextContainerInset(CGSize::new(8.0, 8.0));
+        tv.setString(&NSString::from_str(&exp.text));
+        self.preview_container.addSubview(&tv);
+
+        // 底部注记
+        let note = NSTextField::labelWithString(&NSString::from_str("已按当前上下文展开"), mtm);
+        note.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+        note.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        note.setFrame(rect(12.0, 4.0, pw - 24.0, 14.0));
+        self.preview_container.addSubview(&note);
     }
 }
 

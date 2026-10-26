@@ -5,12 +5,12 @@ use objc2::AnyThread;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSBitmapImageFileType, NSBitmapImageRep, NSColor, NSFont, NSImage, NSImageView,
-    NSLineBreakMode, NSTableCellView, NSTextField,
+    NSLineBreakMode, NSTableCellView, NSTextAlignment, NSTextField,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSMutableAttributedString, NSString};
 
-use crate::model::{ClipKind, SearchableItem};
+use crate::model::{ClipKind, SearchableItem, SnippetItem};
 
 /// 行高（pt）。
 pub const ROW_HEIGHT: f64 = 32.0;
@@ -188,6 +188,87 @@ pub unsafe fn build_row(
             16.0,
         ));
         cell.addSubview(&time);
+        cell
+    }
+}
+
+/// 片段行左侧 accent 徽标宽度（pt）。
+const SNIPPET_BADGE_WIDTH: f64 = 34.0;
+/// 徽标与主文本的间距（pt）。
+const SNIPPET_BADGE_GAP: f64 = 6.0;
+
+/// 构造片段行（与 [`build_row`] 同风格：左侧 accent 圆角徽标「片段」，
+/// 关键词为主文本并承载搜索高亮，名称为右侧次级色小字，均单行截断）。
+///
+/// # Safety
+///
+/// 主线程调用（mtm 保证）。
+pub unsafe fn build_snippet_row(
+    mtm: MainThreadMarker,
+    view_width: f64,
+    snippet: &SnippetItem,
+    char_indices: &[usize],
+    selected: bool,
+) -> Retained<NSTableCellView> {
+    unsafe {
+        let cell = NSTableCellView::new(mtm);
+
+        // 选中态高亮（与剪贴板行同做法：cell layer 背景）
+        if selected {
+            cell.setWantsLayer(true);
+            if let Some(layer) = cell.layer() {
+                let soft = crate::compat::accent_color().colorWithAlphaComponent(0.18);
+                layer.setBackgroundColor(Some(&soft.CGColor()));
+                layer.setCornerRadius(4.0);
+            }
+        }
+
+        // 徽标「片段」：accent 淡底圆角 + accent 文字（同选中态的淡底做法）
+        let badge = NSTextField::labelWithString(&NSString::from_str("片段"), mtm);
+        badge.setFont(Some(&NSFont::systemFontOfSize(9.0)));
+        badge.setTextColor(Some(&crate::compat::accent_color()));
+        badge.setAlignment(NSTextAlignment::Center);
+        badge.setWantsLayer(true);
+        if let Some(layer) = badge.layer() {
+            let bg = crate::compat::accent_color().colorWithAlphaComponent(0.18);
+            layer.setBackgroundColor(Some(&bg.CGColor()));
+            layer.setCornerRadius(3.0);
+        }
+        badge.setFrame(rect(
+            CONTENT_X,
+            (ROW_HEIGHT - 16.0) / 2.0,
+            SNIPPET_BADGE_WIDTH,
+            16.0,
+        ));
+        cell.addSubview(&badge);
+
+        // 主文本：关键词（高亮索引为 keyword 的 char 偏移，复用 build_row 的富文本逻辑）
+        let text_x = CONTENT_X + SNIPPET_BADGE_WIDTH + SNIPPET_BADGE_GAP;
+        let keyword = NSTextField::labelWithString(&NSString::from_str(&snippet.keyword), mtm);
+        keyword.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        keyword.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        keyword.setAttributedStringValue(&highlighted_preview(&snippet.keyword, char_indices));
+        keyword.setFrame(rect(
+            text_x,
+            (ROW_HEIGHT - 18.0) / 2.0,
+            (view_width - text_x - META_WIDTH - 8.0).max(40.0),
+            18.0,
+        ));
+        cell.addSubview(&keyword);
+        cell.setTextField(Some(&keyword));
+
+        // 次级小字：名称（占用与剪贴板行时间列相同的右侧位置）
+        let name = NSTextField::labelWithString(&NSString::from_str(&snippet.name), mtm);
+        name.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+        name.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        name.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        name.setFrame(rect(
+            view_width - META_WIDTH - 8.0,
+            (ROW_HEIGHT - 16.0) / 2.0,
+            META_WIDTH,
+            16.0,
+        ));
+        cell.addSubview(&name);
         cell
     }
 }
